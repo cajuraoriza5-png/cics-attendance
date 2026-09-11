@@ -215,7 +215,7 @@ body{
         <div class="tagline">📸 Smart Recognition · ⚡ Real-time Accountability</div>
         <div class="badge">💡 CICS | Advanced Attendance and Penalty Monitoring</div>
 
-        <a href="STUDENT_LOGIN.PHP" class="btn">Student Login</a>
+        <a href="student_login.php" class="btn">Student Login</a>
         <a href="ADMIN_LOGIN.PHP" class="btn btn-admin">Admin Login</a>
 
     </div>
