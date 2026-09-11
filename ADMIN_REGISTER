@@ -1,0 +1,157 @@
+<?php
+$conn = new mysqli("localhost","root","","cics_attendance");
+
+$error = "";
+
+if($_SERVER["REQUEST_METHOD"] == "POST"){
+
+    $username = $_POST['username'];
+
+    // CHECK IF USERNAME EXISTS
+    $check = $conn->query("SELECT id FROM users WHERE username='$username'");
+    if($check->num_rows > 0){
+        $error = "Username already exists!";
+    } else {
+
+        if($_POST['password'] !== $_POST['confirm_password']){
+            $error = "Passwords do not match!";
+        } else {
+
+            $last_name = $_POST['last_name'];
+            $first_name = $_POST['first_name'];
+            $middle_name = $_POST['middle_name'];
+            $email = $_POST['email'];
+            $birthdate = $_POST['birthdate'];
+            $age = date_diff(date_create($birthdate), date_create('today'))->y;
+            $phone = "+63" . $_POST['phone'];
+
+            $region = "Western Visayas";
+            $province = $_POST['province'];
+            $municipality = $_POST['municipality'];
+            $barangay = $_POST['barangay'];
+            $postal_code = $_POST['postal_code'];
+
+            $password = password_hash($_POST['password'], PASSWORD_DEFAULT);
+
+            $sql = "INSERT INTO users 
+            (last_name, first_name, middle_name, email, phone, birthdate, age, username,  password)
+            VALUES 
+            ('$last_name','$first_name','$middle_name','$email','$phone','$birthdate','$age','$username','$password')";
+
+            if($conn->query($sql) === TRUE){
+                echo "<script>alert('Registered Successfully!'); window.location='index.php';</script>";
+                exit;
+            } else {
+                $error = "Error: " . $conn->error;
+            }
+        }
+    }
+}
+?>
+<!DOCTYPE html>
+<html>
+<head>
+<title>Register - NISU CICS</title>
+<style>
+body{
+    background:#0b3c70 url('falcon.png') no-repeat center center;
+    background-size: cover;
+    font-family: Arial, sans-serif;
+}
+.container{
+    width:500px;
+    margin:50px auto;
+    background:white;
+    padding:30px;
+    border-radius:15px;
+    box-shadow:0 0 20px rgba(0,0,0,0.3);
+}
+h2{
+    text-align:center;
+    color:#0b3c70;
+}
+input, select{
+    width:100%;
+    padding:10px;
+    margin:8px 0;
+    border-radius:8px;
+    border:1px solid #ccc;
+}
+button{
+    width:100%;
+    padding:12px;
+    background:#ffd400;
+    border:none;
+    font-weight:bold;
+    cursor:pointer;
+}
+button:hover{
+    background:#ffca28;
+}
+.error{
+    color:red;
+    font-weight:bold;
+    margin-bottom:10px;
+}
+.password-wrapper{
+    position:relative;
+}
+.password-wrapper span{
+    position:absolute;
+    right:15px;
+    top:50%;
+    transform:translateY(-50%);
+    cursor:pointer;
+}
+</style>
+
+
+function togglePassword(fieldId) {
+    var field = document.getElementById(fieldId);
+    if (field.type === "password") {
+        field.type = "text";
+    } else {
+        field.type = "password";
+    }
+}
+</script>
+
+</head>
+<body>
+<div class="container">
+<h2>Register Account</h2>
+
+<?php if(!empty($error)) echo "<div class='error'>$error</div>"; ?>
+
+<form method="POST">
+
+
+<input type="text" name="last_name" placeholder="Last Name" required>
+<input type="text" name="first_name" placeholder="First Name" required>
+<input type="text" name="middle_name" placeholder="Middle Name">
+<input type="email" name="email" placeholder="Email Address" required>
+<input type="text" name="username" placeholder="Username" required>
+	<!-- PASSWORD -->
+<div class="password-wrapper">
+    <input type="password" name="password" id="password" placeholder="Password" required>
+    <span onclick="togglePassword('password')">👁</span>
+</div>
+
+<!-- CONFIRM PASSWORD -->
+<div class="password-wrapper">
+    <input type="password" name="confirm_password" id="confirm_password" placeholder="Confirm Password" required>
+    <span onclick="togglePassword('confirm_password')">👁</span>
+</div>
+
+
+
+<input type="date" name="birthdate" required>
+<input type="text" name="phone" placeholder="915xxxxxxx" maxlength="9" required>
+
+
+<button type="submit">Register</button>
+
+</form>
+</div>
+</body>
+</html>

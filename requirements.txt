@@ -1,0 +1,9 @@
+numpy>=1.24,<2.0
+opencv-contrib-python
+setuptools<81
+dlib
+face_recognition
+face_recognition_models @ https://github.com/ageitgey/face_recognition_models/archive/refs/heads/master.zip
+Pillow
+flask
+flask-cors

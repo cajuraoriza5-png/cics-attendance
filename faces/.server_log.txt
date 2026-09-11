@@ -1,0 +1,435 @@
+[face_server] -- Step 1/4: Starting model load...
+[face_server] -- Step 2/4: Loading Haar Cascade...
+ * Serving Flask app 'face_server'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://127.0.0.1:5001
+Press CTRL+C to quit
+[face_server] Haar Cascade loaded [OK]
+[face_server] -- Step 3/4: Checking opencv-contrib (no install)...
+[face_server] opencv-contrib available [OK]
+[face_server] Loading LBPH model from trainer.yml...
+[face_server] LBPH loaded [OK]
+[face_server] -- Step 4/4: Checking face_recognition helper (optional)...
+C:\Users\840G3\AppData\Local\Programs\Python\Python311\Lib\site-packages\face_recognition_models\__init__.py:7: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_filename
+[face_server] face_recognition module loaded [OK]
+[face_server] face_recognition encodings loaded (284 encodings, 12 students) [OK]
+[face_server] [OK] Ready. Face server running on port 5001 (LBPH mode).
+127.0.0.1 - - [08/Sep/2026 21:13:14] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:19] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:22] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:25] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:28] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:31] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:34] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:35] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:37] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:38] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:40] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:41] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:43] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:46] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:49] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:52] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:53] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:55] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:56] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:58] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:13:59] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:01] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:02] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:04] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:05] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:07] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:08] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:10] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:11] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:13] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:14] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:16] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:17] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:19] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:20] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:24] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:26] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:29] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:31] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:32] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:14:36] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:17:07] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [08/Sep/2026 21:17:35] "GET /status HTTP/1.1" 200 -
+[face_server] -- Step 1/4: Starting model load...
+[face_server] -- Step 2/4: Loading Haar Cascade...
+ * Serving Flask app 'face_server'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://127.0.0.1:5001
+Press CTRL+C to quit
+[face_server] Haar Cascade loaded [OK]
+[face_server] -- Step 3/4: Checking opencv-contrib (no install)...
+[face_server] opencv-contrib available [OK]
+[face_server] Loading LBPH model from trainer.yml...
+127.0.0.1 - - [09/Sep/2026 10:15:00] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:15:00] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:15:02] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:15:04] "GET /status HTTP/1.1" 200 -
+[face_server] LBPH loaded [OK]
+[face_server] -- Step 4/4: Checking face_recognition helper (optional)...
+C:\Users\840G3\AppData\Local\Programs\Python\Python311\Lib\site-packages\face_recognition_models\__init__.py:7: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_filename
+127.0.0.1 - - [09/Sep/2026 10:15:06] "GET /status HTTP/1.1" 200 -
+[face_server] face_recognition module loaded [OK]
+[face_server] face_recognition encodings loaded (284 encodings, 12 students) [OK]
+[face_server] [OK] Ready. Face server running on port 5001 (LBPH mode).
+127.0.0.1 - - [09/Sep/2026 10:15:12] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:15:12] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:15:12] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:13] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:18] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:21] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:24] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:27] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:30] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:32] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:35] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:38] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:41] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:44] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:47] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:50] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:54] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:16:56] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:00] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:03] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:05] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:08] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:11] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:13] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:16] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:19] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:22] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:25] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:28] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:31] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:34] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:37] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:40] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:43] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:46] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:17:50] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:18:23] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:18:28] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:18:31] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:18:34] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:18:37] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:18:40] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:18:43] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:18:46] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:18:49] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:18:52] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:18:55] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:18:58] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:01] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:04] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:07] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:10] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:13] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:16] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:19] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:22] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:25] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:28] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:31] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:34] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:37] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:40] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:43] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:46] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:49] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:52] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:55] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:19:58] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:20:01] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:20:04] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:20:07] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:20:10] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:20:13] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:20:16] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:20:19] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:20:22] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:20:23] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:20:26] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:20:29] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:20:33] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:20:33] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:20:33] "POST /train HTTP/1.1" 200 -
+C:\Users\840G3\AppData\Local\Programs\Python\Python311\Lib\site-packages\face_recognition_models\__init__.py:7: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_filename
+{"lbph": {"ok": true, "samples": 284, "students": 12, "error": null}, "fr_helper": {"ok": true, "encodings": 284, "error": null}, "success": true}
+[face_server] LBPH reloaded after training [OK]
+[face_server] FR encodings reloaded [OK]
+127.0.0.1 - - [09/Sep/2026 10:32:54] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:32:57] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:32:59] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:00] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:02] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:03] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:05] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:06] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:08] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:09] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:11] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:12] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:14] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:15] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:17] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:18] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:20] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:21] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:23] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:24] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:26] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:27] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:29] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:31] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:33:58] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:00] "OPTIONS /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:00] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:01] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:01] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:01] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:02] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:02] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:02] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:03] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:03] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:04] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:04] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:04] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:05] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:05] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:05] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:05] "OPTIONS /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:05] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:06] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:06] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:06] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:06] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:07] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:07] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:07] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:07] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:08] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:08] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:08] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:08] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:09] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:09] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:09] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:09] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:10] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:10] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:10] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:10] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:10] "OPTIONS /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:11] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:11] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:11] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:12] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:12] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:12] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:12] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:13] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:13] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:13] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:13] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:14] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:14] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:14] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:14] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:15] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:15] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:15] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:15] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:16] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:16] "OPTIONS /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:16] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:16] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:16] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:17] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:17] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:17] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:17] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:18] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:18] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:18] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:18] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:19] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:19] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:19] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:19] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:20] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:20] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:20] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:20] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:21] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:21] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:21] "OPTIONS /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:21] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:21] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:22] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:22] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:22] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:22] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:23] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:23] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:23] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:23] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:24] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:24] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:24] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:24] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:25] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:25] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:25] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:25] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:26] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:26] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:26] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:26] "POST /train HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:26] "OPTIONS /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:26] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:27] "POST /detect HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:27] "POST /detect HTTP/1.1" 200 -
+C:\Users\840G3\AppData\Local\Programs\Python\Python311\Lib\site-packages\face_recognition_models\__init__.py:7: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_filename
+127.0.0.1 - - [09/Sep/2026 10:34:47] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:50] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:34:53] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:26] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:30] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:31] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:33] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:34] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:36] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:37] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:39] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:40] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:42] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:43] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:45] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:46] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:48] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:49] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:51] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:52] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:54] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:36:56] "POST /recognize HTTP/1.1" 200 -
+{"lbph": {"ok": true, "samples": 284, "students": 12, "error": null}, "fr_helper": {"ok": true, "encodings": 284, "error": null}, "success": true}
+[face_server] LBPH reloaded after training [OK]
+[face_server] FR encodings reloaded [OK]
+127.0.0.1 - - [09/Sep/2026 10:43:26] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:30] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:32] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:33] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:35] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:36] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:38] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:39] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:41] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:42] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:44] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:45] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:47] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:48] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:50] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:51] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:53] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:54] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:56] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:57] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:43:59] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:00] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:02] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:03] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:05] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:06] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:08] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:09] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:11] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:12] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:14] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:15] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:17] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:18] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:20] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:21] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:23] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:30] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:32] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:35] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:36] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:37] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:39] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:40] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:42] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:43] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:45] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:46] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:48] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:49] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:51] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:52] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:54] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:56] "POST /recognize HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 10:44:58] "POST /recognize HTTP/1.1" 200 -
+[face_server] -- Step 1/4: Starting model load...
+[face_server] -- Step 2/4: Loading Haar Cascade...
+ * Serving Flask app 'face_server'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://127.0.0.1:5001
+Press CTRL+C to quit
+[face_server] Haar Cascade loaded [OK]
+[face_server] -- Step 3/4: Checking opencv-contrib (no install)...
+[face_server] opencv-contrib available [OK]
+[face_server] Loading LBPH model from trainer.yml...
+127.0.0.1 - - [09/Sep/2026 12:53:51] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 12:53:51] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 12:53:52] "GET /status HTTP/1.1" 200 -
+[face_server] LBPH loaded [OK]
+[face_server] -- Step 4/4: Checking face_recognition helper (optional)...
+C:\Users\840G3\AppData\Local\Programs\Python\Python311\Lib\site-packages\face_recognition_models\__init__.py:7: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_filename
+127.0.0.1 - - [09/Sep/2026 12:53:58] "GET /status HTTP/1.1" 200 -
+[face_server] face_recognition module loaded [OK]
+[face_server] face_recognition encodings loaded (284 encodings, 12 students) [OK]
+[face_server] [OK] Ready. Face server running on port 5001 (LBPH mode).
+127.0.0.1 - - [09/Sep/2026 12:53:58] "GET /status HTTP/1.1" 200 -
+[face_server] -- Step 1/4: Starting model load...
+[face_server] -- Step 2/4: Loading Haar Cascade...
+ * Serving Flask app 'face_server'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://127.0.0.1:5001
+Press CTRL+C to quit
+[face_server] Haar Cascade loaded [OK]
+[face_server] -- Step 3/4: Checking opencv-contrib (no install)...
+[face_server] opencv-contrib available [OK]
+[face_server] Loading LBPH model from trainer.yml...
+127.0.0.1 - - [09/Sep/2026 14:21:53] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 14:21:54] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 14:21:56] "GET /status HTTP/1.1" 200 -
+[face_server] LBPH loaded [OK]
+[face_server] -- Step 4/4: Checking face_recognition helper (optional)...
+127.0.0.1 - - [09/Sep/2026 14:21:58] "GET /status HTTP/1.1" 200 -
+C:\Users\840G3\AppData\Local\Programs\Python\Python311\Lib\site-packages\face_recognition_models\__init__.py:7: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_filename
+127.0.0.1 - - [09/Sep/2026 14:22:07] "GET /status HTTP/1.1" 200 -
+[face_server] face_recognition module loaded [OK]
+127.0.0.1 - - [09/Sep/2026 14:22:07] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 14:22:07] "GET /status HTTP/1.1" 200 -
+[face_server] face_recognition encodings loaded (284 encodings, 12 students) [OK]
+[face_server] [OK] Ready. Face server running on port 5001 (LBPH mode).
+127.0.0.1 - - [09/Sep/2026 14:22:07] "GET /status HTTP/1.1" 200 -
