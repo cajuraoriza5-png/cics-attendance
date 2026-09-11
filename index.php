@@ -216,7 +216,7 @@ body{
         <div class="badge">💡 CICS | Advanced Attendance and Penalty Monitoring</div>
 
         <a href="student_login.php" class="btn">Student Login</a>
-        <a href="ADMIN_LOGIN.PHP" class="btn btn-admin">Admin Login</a>
+        <a href="admin_login.php" class="btn btn-admin">Admin Login</a>
 
     </div>
 
