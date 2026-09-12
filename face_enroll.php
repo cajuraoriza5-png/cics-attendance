@@ -109,26 +109,8 @@ if($row && $row['face_registered'] == 1 && $reenroll){
 $studentName = trim($row['first_name'] . ' ' . $row['last_name']);
 $redirectUrl = 'student_dashboard.php';
 
-// Auto-start Flask face server if not running (needed for /detect bounding box)
-$fsRunning = false;
-$ch = @curl_init('http://127.0.0.1:5001/status');
-if($ch){
-    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER=>true, CURLOPT_TIMEOUT=>1, CURLOPT_CONNECTTIMEOUT=>1]);
-    curl_exec($ch);
-    $fsRunning = (curl_getinfo($ch, CURLINFO_HTTP_CODE) === 200);
-    curl_close($ch);
-}
-if(!$fsRunning){
-    $script  = __DIR__ . '/face_server.py';
-    $logFile = __DIR__ . '/faces/.server_log.txt';
-    if(stripos(PHP_OS,'WIN')===0){
-        $bat = tempnam(sys_get_temp_dir(),'fsrv_').'.bat';
-        file_put_contents($bat, '@echo off'."\r\n".'py -3 "'.$script.'" > "'.$logFile.'" 2>&1'."\r\n");
-        pclose(popen('start /B "" "'.$bat.'"','r'));
-    } else {
-        exec('nohup py -3 '.escapeshellarg($script).' > '.escapeshellarg($logFile).' 2>&1 &');
-    }
-}
+
+
 ?>
 <!DOCTYPE html>
 <html lang="en">
