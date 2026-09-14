@@ -6,7 +6,8 @@ if(!isset($_SESSION['student_id'])){
     exit;
 }
 
-$conn = new mysqli("localhost","root","","attendance");
+$config = require __DIR__ . '/config.php';
+require __DIR__ . '/db.php';
 
 $student_id = $_SESSION['student_id'];
 $event_id = 1; // You can make this dynamic later

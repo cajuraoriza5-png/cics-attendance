@@ -1,11 +1,7 @@
 <?php
 session_start();
-if(!isset($_SESSION['admin_id'])){
-    header("Location: admin_login.php");
-    exit;
-}
-
-$conn = new mysqli("localhost","root","","attendance");
+$config = require __DIR__ . '/config.php';
+require __DIR__ . '/db.php';
 
 /* FILTERS */
 $eventFilter  = $_GET['event_id'] ?? '';

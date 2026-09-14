@@ -10,7 +10,8 @@ header('Content-Type: application/json');
 @ini_set('memory_limit', '128M');
 @ignore_user_abort(true);
 
-define('FACE_SERVER', 'http://127.0.0.1:5001');
+$config = require __DIR__ . '/config.php';
+define('FACE_SERVER', $config['python_service']['url']);
 
 $scriptDir  = __DIR__;
 $statusFile = $scriptDir . '/faces/.train_status.json';

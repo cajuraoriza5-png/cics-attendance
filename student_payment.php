@@ -1,18 +1,13 @@
 <?php
 date_default_timezone_set('Asia/Manila');
 session_start();
-include("db.php");
+$config = require __DIR__ . '/config.php';
+require __DIR__ . '/db.php';
 
 // Check if student is logged in
 if(!isset($_SESSION['student_id'])){
     header("Location: student_login.php");
     exit();
-}
-
-$conn = new mysqli("localhost","root","","attendance");
-
-if($conn->connect_error){
-    die("Connection failed: " . $conn->connect_error);
 }
 
 $student_id = $_SESSION['student_id'];

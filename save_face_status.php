@@ -1,12 +1,8 @@
 <?php
 header('Content-Type: text/plain');
 
-$conn = new mysqli("localhost","root","","attendance");
-
-if($conn->connect_error){
-    error_log("Database connection failed: " . $conn->connect_error);
-    die("Database connection error");
-}
+$config = require __DIR__ . '/config.php';
+require __DIR__ . '/db.php';
 
 // Validate input
 if(!isset($_GET['uid'])){

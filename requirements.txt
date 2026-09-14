@@ -1,5 +1,5 @@
 numpy>=1.24,<2.0
-opencv-contrib-python
+opencv-contrib-python-headless
 setuptools<81
 dlib
 face_recognition
@@ -7,3 +7,4 @@ face_recognition_models @ https://github.com/ageitgey/face_recognition_models/ar
 Pillow
 flask
 flask-cors
+gunicorn

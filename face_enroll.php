@@ -25,9 +25,8 @@
  *   ?admin=1     - Flag that admin initiated the enrollment
  * -----------------------------------------------------------------------
  */
-session_start();
-include("db.php");
-if($conn->connect_error){ die("Database Connection Failed!"); }
+$config = require __DIR__ . '/config.php';
+require __DIR__ . '/db.php';
 
 // Ensure face_data table exists (auto-create on first run)
 $conn->query("CREATE TABLE IF NOT EXISTS face_data (
@@ -454,7 +453,8 @@ function beginDetection(){
     detectIsRAF = false;
 
     // Fallback: server-side detection via Flask /detect (fast) or face_detect_api.php (slow)
-    const FLASK_DETECT = 'http://127.0.0.1:5001/detect';
+    // Use PHP config to get the Python service URL
+    const FLASK_DETECT = '<?php echo (require __DIR__ . "/config.php")["python_service"]["url"]; ?>/detect';
     let useFlask = true;
     let detectBusy = false;
 

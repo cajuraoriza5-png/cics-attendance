@@ -1,18 +1,13 @@
 <?php
 date_default_timezone_set('Asia/Manila');
 session_start();
-include("db.php");
+$config = require __DIR__ . '/config.php';
+require __DIR__ . '/db.php';
 
 // Check if admin is logged in
 if(!isset($_SESSION['admin_id'])){
     header("Location: admin_login.php");
     exit();
-}
-
-$conn = new mysqli("localhost","root","","attendance");
-
-if($conn->connect_error){
-    die("Connection failed: " . $conn->connect_error);
 }
 
 $admin_id = $_SESSION['admin_id'];

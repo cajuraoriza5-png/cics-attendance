@@ -8,13 +8,14 @@ if(!isset($_SESSION['student_id'])){
 
 $student_id = $_SESSION['student_id'];
 
+$config = require __DIR__ . '/config.php';
+require __DIR__ . '/db.php';
+
 /* RUN PYTHON */
 $output = shell_exec("python recognize.py");
 
 /* GET RESULT (USER ID FROM PYTHON) */
 $recognized_id = trim($output);
-
-$conn = new mysqli("localhost","root","","attendance");
 
 /* CHECK MATCH */
 if($recognized_id == $student_id){

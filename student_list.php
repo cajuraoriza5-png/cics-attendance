@@ -1,12 +1,12 @@
 <?php
 session_start();
-if(!isset($_SESSION['admin_id'])){
+if(!isset($_SESSION['admin_id']) && !isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
     header("Location: admin_login.php");
     exit;
 }
 
-$conn = new mysqli("localhost","root","","attendance");
-if($conn->connect_error) die("Connection failed: ".$conn->connect_error);
+$config = require __DIR__ . '/config.php';
+require __DIR__ . '/db.php';
 
 /* ── ONE-TIME MIGRATION ─────────────────────────────────────────────────── */
 $conn->query("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_officer TINYINT(1) NOT NULL DEFAULT 0");

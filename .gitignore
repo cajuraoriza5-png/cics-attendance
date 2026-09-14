@@ -1,0 +1,52 @@
+# Environment variables
+.env
+.env.local
+
+# Database credentials (if using config files)
+config.local.php
+
+# Python model files (large binary files)
+trainer.yml
+face_encodings.pkl
+*.pkl
+
+# Face images directory (contains user data)
+faces/
+!faces/.gitkeep
+
+# Event banners
+event_banners/
+!event_banners/.gitkeep
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+faces/.server_log.txt
+faces/.server_err.txt
+faces/.train_status.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+New Text Document.txt

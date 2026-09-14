@@ -1,6 +1,7 @@
 <?php
 session_start();
-$conn = new mysqli("localhost","root","","attendance");
+$config = require __DIR__ . '/config.php';
+require __DIR__ . '/db.php';
 
 // MARK AS PAID
 if(isset($_GET['pay'])){
