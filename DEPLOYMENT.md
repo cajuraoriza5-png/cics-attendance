@@ -1,50 +1,135 @@
-# Deployment Guide
+# Render Deployment Guide - LBPH + Fisherfaces
 
-## Current Setup
+## Architecture
 
-- **PHP**: InfinityFree (hosting)
-- **Python**: Local development (planned for Render)
-- **Database**: MySQL (InfinityFree)
+```
+┌─────────────────┐     HTTP     ┌──────────────────┐
+│  PHP Service    │◄────────────►│  Python Service  │
+│  (Main App)    │              │  (Face Server)   │
+│  Port 10000    │              │  Port 5001       │
+└─────────────────┘              └──────────────────┘
+         │                                 │
+         └────────────┬────────────────────┘
+                      │
+              ┌───────▼────────┐
+              │  PostgreSQL   │
+              │  (Database)   │
+              └────────────────┘
+```
 
-## Deployment to Render
+## Hybrid Algorithm
 
-### 1. Deploy Python Service to Render
+- **Primary**: LBPH (Local Binary Patterns Histograms) - Fast, lightweight
+- **Helper**: Fisherfaces (Linear Discriminant Analysis) - Better class separation
+- **Combined**: Both algorithms validate each other for improved accuracy
 
-1. Create account at [render.com](https://render.com)
-2. Click "New +" → "Web Service"
+## Deployment Steps
+
+### 1. Push to GitHub
+
+```bash
+git add .
+git commit -m "Add Render deployment for LBPH+Fisherfaces"
+git push origin main
+```
+
+### 2. Deploy to Render
+
+1. Go to [render.com](https://render.com)
+2. Click "New +" → "Blueprint"
 3. Connect your GitHub repository
-4. Configure:
-   - Runtime: Python 3
-   - Build Command: `pip install -r requirements.txt`
-   - Start Command: `gunicorn face_server:app --bind 0.0.0.0:$PORT`
-5. Deploy
+4. Render will read `render.yaml` and create services automatically
 
-### 2. Update PHP Files
+### 3. Services Created
 
-Change all `http://127.0.0.1:5001` references to your Render Python service URL:
-- `face_recognize_api.php`
-- `face_train_multi.php`
-- `face_recognition_scan.php`
-- `check_server.php`
-- `check_algorithm.php`
-- `face_enroll.php`
+Render will create:
+- **cics-attendance-php**: PHP web service
+- **cics-attendance-python**: Python face recognition service
+- **cics-attendance-db**: PostgreSQL database
 
-### 3. Database Migration (Optional)
+### 4. Update Python Service URL
 
-If moving from InfinityFree MySQL to Render PostgreSQL:
-1. Export MySQL database
-2. Convert to PostgreSQL
-3. Import to Render
-4. Update connection strings
+After deployment, Render will assign a URL to your Python service (e.g., `https://cics-attendance-python.onrender.com`).
 
-### 4. File Storage
+Update the `PYTHON_SERVICE_URL` in the PHP service environment variables to match the actual Python service URL.
 
-For persistent face data on Render:
-- Use Render Disk (paid feature)
-- Or use cloud storage (S3, Cloudinary)
+### 5. Database Migration
+
+If migrating from MySQL (InfinityFree) to PostgreSQL (Render):
+
+1. Export your MySQL database from InfinityFree
+2. Convert MySQL to PostgreSQL format
+3. Import to Render PostgreSQL
+4. Update any MySQL-specific queries to PostgreSQL syntax
+
+### 6. File Storage
+
+For persistent face data (`faces/` directory, `trainer.yml`, `fisherfaces.yml`):
+
+**Option A: Render Disk (Paid)**
+- Add disk to Python service
+- Mount to `/opt/render/project/faces`
+
+**Option B: Cloud Storage (Recommended for Free Tier)**
+- Upload face images to S3 or Cloudinary
+- Modify Python to load from URLs
+- Store model files in database or object storage
+
+**Option C: Re-train on Deploy**
+- Face data can be re-enrolled after deployment
+- Students re-enroll their faces on the live system
+
+### 7. Test Deployment
+
+1. Check PHP service: `https://cics-attendance-php.onrender.com`
+2. Check Python service: `https://cics-attendance-python.onrender.com/status`
+3. Expected status response:
+   ```json
+   {
+     "ok": true,
+     "models": {
+       "lbph": true,
+       "fisherfaces": true,
+       "loading": false
+     }
+   }
+   ```
+4. Test face recognition endpoint
+5. Verify database connectivity
+
+## Environment Variables
+
+Render automatically sets these from `render.yaml`:
+
+**PHP Service:**
+- `DATABASE_URL`: Auto-set from database
+- `PYTHON_SERVICE_URL`: Python service URL
+- `APP_ENV`: production
+
+**Python Service:**
+- `PYTHON_VERSION`: 3.11.0
+- `PORT`: 5001
 
 ## Notes
 
-- Render free tier has build limitations
-- dlib may not compile on Render free tier
-- Consider using Railway.app if dlib compilation fails
+- ✅ LBPH + Fisherfaces works on Render free tier (no dlib needed)
+- ✅ Always-on deployment (no sleeping)
+- ✅ Custom domain available on free tier
+- ⚠️ Free tier has limited disk space (consider cloud storage for face data)
+- ⚠️ Build time may be longer for OpenCV compilation
+
+## Troubleshooting
+
+**Build fails on OpenCV:**
+- Ensure `opencv-contrib-python-headless` is in requirements.txt
+- Render may take 5-10 minutes to compile OpenCV
+
+**Python service not responding:**
+- Check Render logs for errors
+- Verify gunicorn is starting correctly
+- Check port configuration
+
+**Database connection issues:**
+- Verify DATABASE_URL is set correctly
+- Check PostgreSQL is running
+- Test connection in Render dashboard

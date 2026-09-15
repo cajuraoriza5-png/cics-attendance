@@ -63,7 +63,8 @@ if(isset($_GET['scanned_ids'])){
 // ── Server-status proxy (relays Flask /status to JS without CORS) ──────────
 if(isset($_GET['server_status'])){
     header('Content-Type: application/json');
-    $ch = curl_init('http://127.0.0.1:5001/status');
+    $config = require __DIR__ . '/config.php';
+    $ch = curl_init($config['python_service']['url'] . '/status');
     curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>3,CURLOPT_CONNECTTIMEOUT=>2]);
     $r    = curl_exec($ch);
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
