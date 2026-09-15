@@ -1,8 +1,12 @@
 <?php
 header('Content-Type: text/plain');
 
-$config = require __DIR__ . '/config.php';
-require __DIR__ . '/db.php';
+$conn = new mysqli("localhost","root","","attendance");
+
+if($conn->connect_error){
+    error_log("Database connection failed: " . $conn->connect_error);
+    die("Database connection error");
+}
 
 // Validate input
 if(!isset($_POST['uid']) || !isset($_FILES['image'])){

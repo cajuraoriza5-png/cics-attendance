@@ -2,8 +2,10 @@
 date_default_timezone_set('Asia/Manila');
 header('Content-Type: application/json');
 
-$config = require __DIR__ . '/config.php';
-require __DIR__ . '/db.php';
+$conn = new mysqli("localhost","root","","attendance");
+if($conn->connect_error){
+    echo json_encode(['success'=>false,'message'=>'Database connection error']); exit;
+}
 
 // ── Validate input ────────────────────────────────────────────────────────
 $student_id = intval($_POST['student_id'] ?? 0);

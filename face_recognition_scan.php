@@ -24,8 +24,8 @@
  */
 date_default_timezone_set('Asia/Manila');
 session_start();
-$config = require __DIR__ . '/config.php';
-require __DIR__ . '/db.php';
+$conn = new mysqli("localhost","root","","attendance");
+if($conn->connect_error){ die("Connection failed"); }
 // Migration: ensure is_officer column exists before querying it
 $conn->query("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_officer TINYINT(1) NOT NULL DEFAULT 0");
 
@@ -63,8 +63,7 @@ if(isset($_GET['scanned_ids'])){
 // ── Server-status proxy (relays Flask /status to JS without CORS) ──────────
 if(isset($_GET['server_status'])){
     header('Content-Type: application/json');
-    $config = require __DIR__ . '/config.php';
-    $ch = curl_init($config['python_service']['url'] . '/status');
+    $ch = curl_init('http://127.0.0.1:5001/status');
     curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>3,CURLOPT_CONNECTTIMEOUT=>2]);
     $r    = curl_exec($ch);
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);

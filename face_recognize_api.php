@@ -3,8 +3,7 @@ header('Content-Type: application/json');
 @set_time_limit(30);
 @ini_set('memory_limit','128M');
 
-$config = require __DIR__ . '/config.php';
-define('FACE_SERVER', $config['python_service']['url']);
+define('FACE_SERVER', 'http://127.0.0.1:5001');
 
 // ── Input validation ─────────────────────────────────────────────────────
 $imageData = $_POST['image'] ?? '';

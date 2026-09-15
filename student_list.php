@@ -5,8 +5,8 @@ if(!isset($_SESSION['admin_id']) && !isset($_SESSION['role']) || $_SESSION['role
     exit;
 }
 
-$config = require __DIR__ . '/config.php';
-require __DIR__ . '/db.php';
+$conn = new mysqli("localhost","root","","attendance");
+if($conn->connect_error) die("Connection failed: ".$conn->connect_error);
 
 /* ── ONE-TIME MIGRATION ─────────────────────────────────────────────────── */
 $conn->query("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_officer TINYINT(1) NOT NULL DEFAULT 0");

@@ -7,8 +7,11 @@ if(!isset($_SESSION['admin_id'])){
     exit;
 }
 
-$config = require __DIR__ . '/config.php';
-require __DIR__ . '/db.php';
+$conn = new mysqli("localhost","root","","attendance");
+
+if($conn->connect_error){
+    die("Connection failed: " . $conn->connect_error);
+}
 
 if(file_exists("auto_absent.php")){
     include("auto_absent.php");

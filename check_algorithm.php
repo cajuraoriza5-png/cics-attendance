@@ -24,8 +24,7 @@ $testImage = $faces[0];
 $imageData = base64_encode(file_get_contents($testImage));
 
 // Send test request
-$config = require __DIR__ . '/config.php';
-$ch = curl_init($config['python_service']['url'] . '/recognize');
+$ch = curl_init('http://127.0.0.1:5001/recognize');
 curl_setopt($ch, CURLOPT_POST, 1);
 curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['image' => $imageData]));
 curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);

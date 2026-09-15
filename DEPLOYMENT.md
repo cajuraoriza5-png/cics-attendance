@@ -1,116 +1,50 @@
 # Deployment Guide
 
-## ⚠️ Important: Hybrid Algorithm Support
+## Current Setup
 
-Your system uses a **hybrid algorithm** combining:
-- **LBPH** (OpenCV) - Primary, fast, lightweight
-- **dlib/face_recognition** - Helper, validates and boosts LBPH accuracy
+- **PHP**: InfinityFree (hosting)
+- **Python**: Local development (planned for Render)
+- **Database**: MySQL (InfinityFree)
 
-This hybrid approach is **already implemented** in `face_server.py` and works perfectly together. The challenge is deployment platform compatibility.
+## Deployment to Render
 
-## Recommended Platform: Railway.app
+### 1. Deploy Python Service to Render
 
-**Use Railway.app** instead of Render because:
-- ✅ Can compile dlib/face_recognition (better build environment)
-- ✅ Supports both PHP and Python services
-- ✅ Built-in PostgreSQL database
-- ✅ Volume support for persistent face data storage
-- ✅ Free tier available
-
-**See `RAILWAY_DEPLOYMENT.md` for complete Railway deployment instructions.**
-
-## Alternative: Render (Not Recommended for Hybrid)
-
-Render's free tier **cannot compile dlib**. If you must use Render:
-- Use Render paid tier (better build environment)
-- Pre-compile dlib locally and upload as wheel
-- Accept LBPH-only mode (loses hybrid benefits)
-
-## Architecture (Both Platforms)
-
-```
-┌─────────────────┐     HTTP     ┌──────────────────┐
-│  PHP Service    │◄────────────►│  Python Service  │
-│  (Main App)    │              │  (Face Server)   │
-│  Port 10000    │              │  Port 5001       │
-└─────────────────┘              └──────────────────┘
-         │                                 │
-         └────────────┬────────────────────┘
-                      │
-              ┌───────▼────────┐
-              │  PostgreSQL   │
-              │  (Database)   │
-              └────────────────┘
-```
-
-## File Storage Requirements
-
-Both platforms need persistent storage for:
-- `faces/` directory (enrolled face images)
-- `trainer.yml` (LBPH trained model)
-- `face_encodings.pkl` (dlib face encodings)
-
-**Railway**: Use Volumes feature
-**Render**: Use Render Disk (paid) or cloud storage
-
-## Deployment Steps
-
-### 1. Prepare Repository
-```bash
-# Copy environment template
-cp .env.example .env
-
-# Edit .env with your local values for testing
-# On Render, these will be set via environment variables
-```
-
-### 2. Push to GitHub
-```bash
-git add .
-git commit -m "Add Render deployment configuration"
-git push origin main
-```
-
-### 3. Deploy on Render
-1. Go to [render.com](https://render.com)
-2. Click "New +" → "Blueprint"
+1. Create account at [render.com](https://render.com)
+2. Click "New +" → "Web Service"
 3. Connect your GitHub repository
-4. Render will read `render.yaml` and create services automatically
+4. Configure:
+   - Runtime: Python 3
+   - Build Command: `pip install -r requirements.txt`
+   - Start Command: `gunicorn face_server:app --bind 0.0.0.0:$PORT`
+5. Deploy
 
-### 4. Set Environment Variables
-In Render dashboard, set these for the PHP service:
-- `DATABASE_URL` (auto-set from database)
-- `PYTHON_SERVICE_URL`: Your Python service URL (e.g., `https://cics-attendance-python.onrender.com`)
-- `APP_ENV`: `production`
+### 2. Update PHP Files
 
-### 5. Migrate Database
-Since you're moving from MySQL to PostgreSQL:
-1. Export your MySQL database
-2. Convert to PostgreSQL format
-3. Import to Render PostgreSQL
-4. Update any MySQL-specific queries to PostgreSQL syntax
+Change all `http://127.0.0.1:5001` references to your Render Python service URL:
+- `face_recognize_api.php`
+- `face_train_multi.php`
+- `face_recognition_scan.php`
+- `check_server.php`
+- `check_algorithm.php`
+- `face_enroll.php`
 
-### 6. Handle Face Data
-For the `faces/` directory and model files:
-- **Option A**: Use Render Disk (paid)
-  - Add disk to Python service
-  - Mount to `/opt/render/project/faces`
-  
-- **Option B**: Use cloud storage
-  - Upload face images to S3/Cloudinary
-  - Modify Python to load from URLs
-  - Store model in database or object storage
+### 3. Database Migration (Optional)
 
-## Testing After Deployment
+If moving from InfinityFree MySQL to Render PostgreSQL:
+1. Export MySQL database
+2. Convert to PostgreSQL
+3. Import to Render
+4. Update connection strings
 
-1. Check PHP service: `https://cics-attendance-php.onrender.com`
-2. Check Python service: `https://cics-attendance-python.onrender.com/status`
-3. Test face recognition endpoint
-4. Verify database connectivity
+### 4. File Storage
 
-## Alternative: Railway.app
-Railway supports both PHP and Python better than Render:
-- Better build environment for Python packages
-- Easier to run multiple services
-- Built-in PostgreSQL
-- Consider migrating to Railway if Render doesn't work well
+For persistent face data on Render:
+- Use Render Disk (paid feature)
+- Or use cloud storage (S3, Cloudinary)
+
+## Notes
+
+- Render free tier has build limitations
+- dlib may not compile on Render free tier
+- Consider using Railway.app if dlib compilation fails

@@ -56,8 +56,7 @@ if ($check) {
     echo "Port 5001: RUNNING\n";
 
     // Try to get status
-    $config = require __DIR__ . '/config.php';
-    $status = @file_get_contents($config['python_service']['url'] . '/status');
+    $status = @file_get_contents('http://127.0.0.1:5001/status');
     if ($status) {
         echo "Status API: OK\n";
         echo "Response: $status\n";

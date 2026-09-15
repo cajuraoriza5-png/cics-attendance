@@ -4,8 +4,11 @@
  * Clears all data from the CICS Attendance System while preserving table structure
  */
 
-$config = require __DIR__ . '/config.php';
-require __DIR__ . '/db.php';
+$conn = new mysqli("localhost","root","","attendance");
+
+if($conn->connect_error){
+    die("Connection failed: " . $conn->connect_error);
+}
 
 echo "<h2>🔄 Database Reset - CICS Attendance System</h2>";
 echo "<p style='color: red; font-weight: bold;'>⚠️ WARNING: This will delete ALL data in the system!</p>";
