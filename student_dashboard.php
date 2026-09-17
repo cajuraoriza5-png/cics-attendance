@@ -8,7 +8,6 @@ if(!isset($_SESSION['student_id'])){
 
 include("db.php");
 
-
 $student_id = $_SESSION['student_id'];
 
 // Get GCash number from admin
