@@ -25,8 +25,7 @@
  *   ?admin=1     - Flag that admin initiated the enrollment
  * -----------------------------------------------------------------------
  */
-$conn = new mysqli("localhost","root","","attendance");
-if($conn->connect_error){ die("Database Connection Failed!"); }
+include("db.php");
 
 // Ensure face_data table exists (auto-create on first run)
 $conn->query("CREATE TABLE IF NOT EXISTS face_data (
