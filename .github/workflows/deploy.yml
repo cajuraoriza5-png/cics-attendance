@@ -10,21 +10,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-     - name: Download repository
+      - name: Download repository
         uses: actions/checkout@v4
+
       - name: Create database config
         run: |
-          cat > db_config.php <<'PHP'
-          <?php
-          return [
-              'host' => 'sql107.infinityfree.com',
-              'username' => 'if0_42609958',
-              'password' => '${{ secrets.DB_PASS }}',
-              'database' => 'if0_42609958_attendance',
-              'port' => 3306
-          ];
-          ?>
-          PHP
+          echo "<?php" > db_config.php
+          echo "return [" >> db_config.php
+          echo "    'host' => 'sql107.infinityfree.com'," >> db_config.php
+          echo "    'username' => 'if0_42609958'," >> db_config.php
+          echo "    'password' => '${{ secrets.DB_PASS }}'," >> db_config.php
+          echo "    'database' => 'if0_42609958_attendance'," >> db_config.php
+          echo "    'port' => 3306" >> db_config.php
+          echo "];" >> db_config.php
+          echo "?>" >> db_config.php
 
       - name: Deploy to InfinityFree
         uses: SamKirkland/FTP-Deploy-Action@v4.3.6
