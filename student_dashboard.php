@@ -6,11 +6,8 @@ if(!isset($_SESSION['student_id'])){
     exit;
 }
 
-$conn = new mysqli("localhost","root","","attendance");
+include("db.php");
 
-if($conn->connect_error){
-    die("Connection failed: " . $conn->connect_error);
-}
 
 $student_id = $_SESSION['student_id'];
 
