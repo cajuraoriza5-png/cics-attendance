@@ -1,13 +1,9 @@
 <?php
 session_start();
-$conn = new mysqli("localhost","root","","attendance");
 
-if($conn->connect_error){
-    die("Connection failed: " . $conn->connect_error);
-}
+include("db.php");
 
 $error = "";
-
 if($_SERVER["REQUEST_METHOD"] == "POST"){
 
 $username   = trim($_POST['username']);
