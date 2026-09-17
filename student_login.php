@@ -4,11 +4,8 @@ ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 session_start();
 
-$conn = new mysqli("sqlxxx.infinityfree.com","if0_37384435","password","if0_37384435_cics_attendance");
+include("db.php");
 
-if($conn->connect_error){
-    die("Connection failed: " . $conn->connect_error);
-}
 
 $error = "";
 
