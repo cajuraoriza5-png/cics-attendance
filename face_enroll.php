@@ -452,8 +452,7 @@ function beginDetection(){
     detectIsRAF = false;
 
     // Fallback: server-side detection via Flask /detect (fast) or face_detect_api.php (slow)
-    $config = require __DIR__ . '/config.php';
-    const FLASK_DETECT = $config['python_service']['url'] . '/detect';
+   const FLASK_DETECT = 'http://127.0.0.1:5001/detect';
     let useFlask = true;
     let detectBusy = false;
 
