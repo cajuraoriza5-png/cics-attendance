@@ -452,7 +452,7 @@ function beginDetection(){
     detectIsRAF = false;
 
     // Fallback: server-side detection via Flask /detect (fast) or face_detect_api.php (slow)
-   const FLASK_DETECT = 'http://127.0.0.1:5001/detect';
+   const FLASK_DETECT = 'https://cics-attendance.onrender.com/detect';
     let useFlask = true;
     let detectBusy = false;
 
