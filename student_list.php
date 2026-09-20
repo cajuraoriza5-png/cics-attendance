@@ -5,7 +5,11 @@ if(!isset($_SESSION['admin_id']) && !isset($_SESSION['role']) || $_SESSION['role
     exit;
 }
 
-$conn = new mysqli("localhost","root","","attendance");
+include("db.php");
+
+if($conn->connect_error){
+    die("Connection failed: " . $conn->connect_error);
+}
 if($conn->connect_error) die("Connection failed: ".$conn->connect_error);
 
 /* ── ONE-TIME MIGRATION ─────────────────────────────────────────────────── */
