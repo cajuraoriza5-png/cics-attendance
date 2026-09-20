@@ -1,10 +1,10 @@
 <?php
 session_start();
-if(!isset($_SESSION['admin_id']) && !isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
+
+if(!isset($_SESSION['admin_id']) && (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin')){
     header("Location: admin_login.php");
     exit;
 }
-<?php
 
 include("db.php");
 
