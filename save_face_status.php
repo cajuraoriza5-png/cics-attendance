@@ -1,7 +1,7 @@
 <?php
 header('Content-Type: text/plain');
 
-$conn = new mysqli("localhost","root","","attendance");
+include("db.php");
 
 if($conn->connect_error){
     error_log("Database connection failed: " . $conn->connect_error);
