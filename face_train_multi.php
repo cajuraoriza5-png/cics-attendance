@@ -332,10 +332,42 @@ if ($failed > 0) {
 // STEP 5: START TRAINING ON RENDER
 // ============================================================
 
-$trainResult = render_get_json(
-    $FACE_SERVER . '/train',
-    15
-);
+$ch = curl_init($FACE_SERVER . '/train');
+
+curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_POST => true,
+    CURLOPT_POSTFIELDS => '{}',
+    CURLOPT_CONNECTTIMEOUT => 15,
+    CURLOPT_TIMEOUT => 30,
+    CURLOPT_HTTPHEADER => [
+        'Content-Type: application/json',
+        'Accept: application/json'
+    ]
+]);
+
+$response = curl_exec($ch);
+
+$curlError = curl_error($ch);
+$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+curl_close($ch);
+
+$trainData = $response !== false
+    ? json_decode($response, true)
+    : null;
+
+$trainResult = [
+    'ok' => (
+        $response !== false &&
+        $httpCode >= 200 &&
+        $httpCode < 300
+    ),
+    'code' => $httpCode,
+    'data' => $trainData,
+    'raw' => $response,
+    'error' => $curlError
+];
 
 
 if (
