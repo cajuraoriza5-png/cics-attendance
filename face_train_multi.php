@@ -370,26 +370,24 @@ $trainResult = [
 ];
 
 
-if (
-    !$trainResult['ok'] ||
-    !is_array($trainResult['data']) ||
-    empty($trainResult['data']['success'])
-) {
+if (!$serverReady) {
+
+    $debug = render_get_json(
+        $FACE_SERVER . '/status',
+        30
+    );
 
     echo json_encode([
         'success' => false,
-        'error' => 'Face images were synchronized, but Render could not start training.',
-        'sync' => [
-            'total' => $totalFiles,
-            'synced' => $synced,
-            'failed' => $failed
-        ],
-        'render_response' => $trainResult['data'] ?? $trainResult['raw'] ?? null
+        'error' => 'Cannot connect to Render face recognition server.',
+        'server' => $FACE_SERVER,
+        'http_code' => $debug['code'] ?? 0,
+        'curl_error' => $debug['error'] ?? '',
+        'response' => $debug['raw'] ?? ''
     ]);
 
     exit;
 }
-
 
 // ============================================================
 // ASYNC MODE
