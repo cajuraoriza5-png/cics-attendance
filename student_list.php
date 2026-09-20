@@ -4,13 +4,13 @@ if(!isset($_SESSION['admin_id']) && !isset($_SESSION['role']) || $_SESSION['role
     header("Location: admin_login.php");
     exit;
 }
+<?php
 
 include("db.php");
 
 if($conn->connect_error){
     die("Connection failed: " . $conn->connect_error);
 }
-if($conn->connect_error) die("Connection failed: ".$conn->connect_error);
 
 /* ── ONE-TIME MIGRATION ─────────────────────────────────────────────────── */
 $conn->query("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_officer TINYINT(1) NOT NULL DEFAULT 0");
