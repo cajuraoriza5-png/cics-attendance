@@ -1,43 +1,144 @@
 <?php
 /**
  * train_status.php
- * Returns the current training status (written by train_all_models.py).
- * Polled by the admin dashboard to show live progress.
  *
- *   GET ?            -> {state, step, progress, message, elapsed, ...}
- *   GET ?clear=1     -> deletes the status file (used after admin acks "done")
+ * Gets the live training status from the Render face recognition server.
+ * The admin dashboard polls this file every 2 seconds.
  */
+
 header('Content-Type: application/json');
 
-$statusFile = __DIR__ . '/faces/.train_status.json';
+
+// ============================================================
+// LOAD CONFIG
+// ============================================================
+
+$config = require __DIR__ . '/config.php';
+
+if (
+    !isset($config['python_service']) ||
+    !isset($config['python_service']['url'])
+) {
+    echo json_encode([
+        'state' => 'error',
+        'message' => 'Python service URL is not configured.'
+    ]);
+    exit;
+}
+
+$FACE_SERVER = rtrim(
+    $config['python_service']['url'],
+    '/'
+);
+
+
+// ============================================================
+// CLEAR STATUS
+// ============================================================
 
 if (isset($_GET['clear'])) {
-    if (file_exists($statusFile)) @unlink($statusFile);
-    echo json_encode(['cleared' => true]);
+
+    echo json_encode([
+        'cleared' => true,
+        'state' => 'idle'
+    ]);
+
     exit;
 }
 
-if (!file_exists($statusFile)) {
-    echo json_encode(['state' => 'idle']);
+
+// ============================================================
+// GET RENDER TRAINING STATUS
+// ============================================================
+
+$ch = curl_init(
+    $FACE_SERVER . '/train/status'
+);
+
+curl_setopt_array($ch, [
+
+    CURLOPT_RETURNTRANSFER => true,
+
+    CURLOPT_CONNECTTIMEOUT => 10,
+
+    CURLOPT_TIMEOUT => 15,
+
+    CURLOPT_FOLLOWLOCATION => true,
+
+    CURLOPT_HTTPHEADER => [
+        'Accept: application/json'
+    ]
+
+]);
+
+$response = curl_exec($ch);
+
+$curlError = curl_error($ch);
+
+$httpCode = curl_getinfo(
+    $ch,
+    CURLINFO_HTTP_CODE
+);
+
+curl_close($ch);
+
+
+// ============================================================
+// CONNECTION ERROR
+// ============================================================
+
+if ($response === false) {
+
+    echo json_encode([
+        'state' => 'error',
+        'message' => 'Cannot connect to Render training server.',
+        'error' => $curlError
+    ]);
+
     exit;
 }
 
-$raw    = @file_get_contents($statusFile);
-$parsed = $raw ? json_decode($raw, true) : null;
 
-if (!$parsed) {
-    echo json_encode(['state' => 'idle']);
+// ============================================================
+// HTTP ERROR
+// ============================================================
+
+if ($httpCode < 200 || $httpCode >= 300) {
+
+    echo json_encode([
+        'state' => 'error',
+        'message' => 'Render training server returned HTTP ' . $httpCode
+    ]);
+
     exit;
 }
 
-// Detect a stale "running" status (process crashed): nothing written for 5 min
-if (($parsed['state'] ?? '') === 'running') {
-    $mtime = @filemtime($statusFile);
-    if ($mtime && (time() - $mtime) > 900) {
-        $parsed['state']   = 'error';
-        $parsed['message'] = 'Training appears stalled (no update in 15 min). Check faces/.train_log.txt';
-    }
+
+// ============================================================
+// DECODE RESPONSE
+// ============================================================
+
+$data = json_decode(
+    $response,
+    true
+);
+
+
+if (!is_array($data)) {
+
+    echo json_encode([
+        'state' => 'error',
+        'message' => 'Invalid response from Render training server.'
+    ]);
+
+    exit;
 }
 
-echo json_encode($parsed);
+
+// ============================================================
+// RETURN RENDER STATUS DIRECTLY
+// ============================================================
+
+echo json_encode($data);
+
 ?>
