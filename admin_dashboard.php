@@ -852,11 +852,11 @@ Welcome back,
             <div class="tm-name">LBPH</div>
             <div class="tm-status" id="tms-lbph">Waiting…</div>
         </div>
-        <div class="tm-card" id="tm-cnn">
-            <div class="tm-icon">🧠</div>
-            <div class="tm-name">Dlib CNN</div>
-            <div class="tm-status" id="tms-cnn">Waiting…</div>
-        </div>
+       <div class="tm-card" id="tm-fisherfaces">
+    <div class="tm-icon">🧠</div>
+    <div class="tm-name">Fisherfaces</div>
+    <div class="tm-status" id="tms-fisherfaces">Waiting…</div>
+</div>
     </div>
     <div class="train-actions">
         <button class="btn-dismiss" id="btnDismiss" onclick="dismissTraining()">✕ Dismiss</button>
@@ -1106,14 +1106,26 @@ function applyStatus(d){
         else     setModelCard('lbph', 'fail',  '❌ ' + (l.error||'failed').substring(0,40));
     }
 
-    // Dlib CNN card
-    if(step === 'fr_helper' && d.state === 'running'){
-        setModelCard('cnn', 'active', 'Generating encodings…');
-    } else if(d.result?.fr_helper) {
-        const f = d.result.fr_helper;
-        if(f.ok) setModelCard('cnn', 'ok',   '✅ ' + f.encodings + ' encodings');
-        else     setModelCard('cnn', 'fail',  '❌ ' + (f.error||'failed').substring(0,40));
+   // Fisherfaces card
+if(step === 'fisherfaces' && d.state === 'running'){
+    setModelCard('fisherfaces', 'active', 'Training…');
+} else if(d.result?.fisherfaces) {
+    const f = d.result.fisherfaces;
+
+    if(f.ok) {
+        setModelCard(
+            'fisherfaces',
+            'ok',
+            '✅ ' + f.samples + ' samples / ' + f.students + ' students'
+        );
+    } else {
+        setModelCard(
+            'fisherfaces',
+            'fail',
+            '❌ ' + (f.error || 'failed').substring(0,40)
+        );
     }
+}
 
 
     // Title
@@ -1156,7 +1168,7 @@ async function startTraining(){
     trainBarFill.style.width = '2%';
     trainBarFill.className = 'train-bar-fill';
     setModelCard('lbph', '', 'Waiting…');
-    setModelCard('cnn', '', 'Waiting…');
+    setModelCard('fisherfaces', '', 'Waiting…');
     btnDismiss.classList.add('hidden');
 
     try {
