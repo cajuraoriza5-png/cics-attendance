@@ -24,8 +24,11 @@
  */
 date_default_timezone_set('Asia/Manila');
 session_start();
-$conn = new mysqli("localhost","root","","attendance");
-if($conn->connect_error){ die("Connection failed"); }
+include("db.php");
+
+if($conn->connect_error){
+    die("Connection failed: " . $conn->connect_error);
+}
 // Migration: ensure is_officer column exists before querying it
 $conn->query("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_officer TINYINT(1) NOT NULL DEFAULT 0");
 
