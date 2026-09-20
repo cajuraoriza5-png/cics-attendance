@@ -1,7 +1,7 @@
 <?php
 session_start();
 
-$conn = new mysqli("localhost","root","","attendance");
+include("db.php");
 
 if($conn->connect_error){
     die("Database Connection Failed!");
