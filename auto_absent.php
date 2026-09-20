@@ -1,6 +1,11 @@
 <?php
 date_default_timezone_set('Asia/Manila');
-$conn = new mysqli("localhost","root","","attendance");
+
+include("db.php");
+
+if($conn->connect_error){
+    die("Connection failed: " . $conn->connect_error);
+}
 
 $event = $conn->query("SELECT * FROM events WHERE event_date = CURDATE() ORDER BY id DESC LIMIT 1")->fetch_assoc();
 if(!$event) return;
