@@ -1,9 +1,25 @@
 <?php
 /**
  * face_train_multi.php
- * Delegates training to the persistent face_server.py Flask backend.
- * Returns a per-model JSON status so the UI can show what trained.
+ *
+ * Correct online training flow:
+ *
+ * InfinityFree
+ *     ↓
+ * Read faces/*.jpg
+ *     ↓
+ * Upload each face image to Render /sync_faces
+ *     ↓
+ * Render stores the images
+ *     ↓
+ * Render /train
+ *     ↓
+ * LBPH + Fisherfaces
+ *
+ * IMPORTANT:
+ * InfinityFree cannot run Python directly.
  */
+
 header('Content-Type: application/json');
 
 @set_time_limit(0);
@@ -11,165 +27,541 @@ header('Content-Type: application/json');
 @ignore_user_abort(true);
 
 $config = require __DIR__ . '/config.php';
-define('FACE_SERVER', $config['python_service']['url']);
 
-$scriptDir  = __DIR__;
-$statusFile = $scriptDir . '/faces/.train_status.json';
-$logFile    = $scriptDir . '/faces/.server_log.txt';
-
-// ── Check / auto-start the face server ─────────────────────────────────────────────
-function face_server_running_train() {
-    $ch = curl_init(FACE_SERVER . '/status');
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT        => 2,
-        CURLOPT_CONNECTTIMEOUT => 2,
+if (
+    !isset($config['python_service']) ||
+    !isset($config['python_service']['url'])
+) {
+    echo json_encode([
+        'success' => false,
+        'error' => 'Python service URL is not configured.'
     ]);
-    curl_exec($ch);
-    $ok = curl_getinfo($ch, CURLINFO_HTTP_CODE) === 200;
-    curl_close($ch);
-    return $ok;
-}
-
-if (!face_server_running_train()) {
-    $script = $scriptDir . '/face_server.py';
-    if (stripos(PHP_OS, 'WIN') === 0) {
-        $bat = tempnam(sys_get_temp_dir(), 'fsrv_') . '.bat';
-        file_put_contents($bat,
-            '@echo off' . "\r\n" .
-            'py -3 "' . $script . '" > "' . $logFile . '" 2>&1' . "\r\n"
-        );
-        pclose(popen('start /B "" "' . $bat . '"', 'r'));
-    } else {
-        exec('nohup py -3 ' . escapeshellarg($script) .
-             ' > ' . escapeshellarg($logFile) . ' 2>&1 &');
-    }
-    $ready = false;
-    for ($i = 0; $i < 20; $i++) {
-        sleep(1);
-        if (face_server_running_train()) { $ready = true; break; }
-    }
-    if (!$ready) {
-        // Fallback: run train_all_models.py directly (no server needed)
-        run_training_direct($scriptDir, $statusFile);
-        exit;
-    }
-}
-
-// ── Direct training fallback (runs train_all_models.py without Flask) ──────────
-function run_training_direct($scriptDir, $statusFile) {
-    $trainScript = $scriptDir . '/train_all_models.py';
-    $trainLog    = $scriptDir . '/faces/.train_log.txt';
-
-    @file_put_contents($statusFile, json_encode([
-        'state' => 'running', 'step' => 'init',
-        'progress' => 2, 'message' => 'Training directly (server unavailable)…',
-        'updated' => date('c'),
-    ]));
-
-    if (stripos(PHP_OS, 'WIN') === 0) {
-        $bat = tempnam(sys_get_temp_dir(), 'trn_') . '.bat';
-        file_put_contents($bat,
-            '@echo off' . "\r\n" .
-            'py -3 "' . $trainScript . '" > "' . $trainLog . '" 2>&1' . "\r\n"
-        );
-        pclose(popen('start /B "" "' . $bat . '"', 'r'));
-    } else {
-        exec('nohup py -3 ' . escapeshellarg($trainScript) .
-             ' > ' . escapeshellarg($trainLog) . ' 2>&1 &');
-    }
-
-    echo json_encode(['success' => true, 'mode' => 'direct',
-        'message' => 'Training started directly (server was unavailable)']);
-}
-
-// Initialize status file so the dashboard sees "starting" immediately
-@file_put_contents($statusFile, json_encode([
-    'state' => 'starting', 'step' => 'init',
-    'progress' => 0, 'message' => 'Queued for training…', 'started' => date('c'),
-]));
-
-// ── Async mode: fire-and-forget POST to /train, return immediately ────────────
-if (isset($_GET['async'])) {
-    $ch = curl_init(FACE_SERVER . '/train');
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POST           => true,
-        CURLOPT_POSTFIELDS     => '{}',
-        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
-        CURLOPT_TIMEOUT        => 5,
-    ]);
-    $resp = curl_exec($ch);
-    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    // If server call failed, use direct fallback
-    if ($code !== 200) {
-        run_training_direct($scriptDir, $statusFile);
-        exit;
-    }
-
-    echo json_encode(['success' => true, 'mode' => 'async',
-        'message' => 'Training started in background']);
     exit;
 }
 
-// ── Synchronous mode: POST /train then poll /train/status until done ─────────
-$ch = curl_init(FACE_SERVER . '/train');
-curl_setopt_array($ch, [
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_POST           => true,
-    CURLOPT_POSTFIELDS     => '{}',
-    CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
-    CURLOPT_TIMEOUT        => 5,
-]);
-$resp = curl_exec($ch);
-$code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-curl_close($ch);
+$FACE_SERVER = rtrim($config['python_service']['url'], '/');
 
-// If server /train call failed, fallback to direct
-if ($code !== 200) {
-    run_training_direct($scriptDir, $statusFile);
-    exit;
-}
+$scriptDir = __DIR__;
+$facesDir  = $scriptDir . '/faces';
 
-// Poll every 2 s until state becomes 'done' or 'error' (max 5 min)
-$parsed = null;
-for ($i = 0; $i < 150; $i++) {
-    sleep(2);
-    $ch2 = curl_init(FACE_SERVER . '/train/status');
-    curl_setopt_array($ch2, [
-        CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 3]);
-    $body = curl_exec($ch2);
-    curl_close($ch2);
-    $s = json_decode($body, true);
-    if ($s && in_array($s['state'] ?? '', ['done', 'error'])) {
-        // Reshape into the format the UI expects
-        $r = $s['result'] ?? [];
-        $parsed = [
-            'success'   => ($s['state'] === 'done'),
-            'lbph'      => $r['lbph']      ?? ['ok' => false, 'error' => 'no data'],
-            'fr_helper' => $r['fr_helper'] ?? ['ok' => false, 'error' => 'no data'],
+
+// ============================================================
+// HELPER: GET JSON FROM RENDER
+// ============================================================
+
+function render_get_json($url, $timeout = 15)
+{
+    $ch = curl_init($url);
+
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT        => $timeout,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_HTTPHEADER     => [
+            'Accept: application/json'
+        ]
+    ]);
+
+    $response = curl_exec($ch);
+
+    $error = curl_error($ch);
+    $code  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    curl_close($ch);
+
+    if ($response === false) {
+        return [
+            'ok' => false,
+            'code' => 0,
+            'error' => $error
         ];
+    }
+
+    $json = json_decode($response, true);
+
+    return [
+        'ok' => ($code >= 200 && $code < 300),
+        'code' => $code,
+        'data' => $json,
+        'raw' => $response
+    ];
+}
+
+
+// ============================================================
+// HELPER: CHECK RENDER SERVER
+// ============================================================
+
+function render_server_ready($FACE_SERVER)
+{
+    $result = render_get_json(
+        $FACE_SERVER . '/status',
+        15
+    );
+
+    return $result['ok'];
+}
+
+
+// ============================================================
+// STEP 1: WAIT FOR RENDER
+// ============================================================
+
+$serverReady = false;
+
+for ($attempt = 1; $attempt <= 3; $attempt++) {
+
+    if (render_server_ready($FACE_SERVER)) {
+        $serverReady = true;
+        break;
+    }
+
+    // Render free service may be sleeping.
+    // Give it time to wake up.
+    sleep(5);
+}
+
+if (!$serverReady) {
+
+    echo json_encode([
+        'success' => false,
+        'error' => 'Cannot connect to Render face recognition server.',
+        'server' => $FACE_SERVER
+    ]);
+
+    exit;
+}
+
+
+// ============================================================
+// STEP 2: FIND ALL ENROLLED FACE IMAGES
+// ============================================================
+
+if (!is_dir($facesDir)) {
+
+    echo json_encode([
+        'success' => false,
+        'error' => 'The local faces directory does not exist.'
+    ]);
+
+    exit;
+}
+
+$faceFiles = [];
+
+$files = scandir($facesDir);
+
+foreach ($files as $file) {
+
+    if ($file === '.' || $file === '..') {
+        continue;
+    }
+
+    $fullPath = $facesDir . DIRECTORY_SEPARATOR . $file;
+
+    if (!is_file($fullPath)) {
+        continue;
+    }
+
+    if (strtolower(pathinfo($file, PATHINFO_EXTENSION)) !== 'jpg') {
+        continue;
+    }
+
+    $faceFiles[] = $fullPath;
+}
+
+sort($faceFiles, SORT_NATURAL);
+
+
+$totalFiles = count($faceFiles);
+
+if ($totalFiles === 0) {
+
+    echo json_encode([
+        'success' => false,
+        'error' => 'No JPG face images were found in the faces directory.'
+    ]);
+
+    exit;
+}
+
+
+// ============================================================
+// STEP 3: SYNC FACE IMAGES TO RENDER
+// ============================================================
+//
+// The current Render /sync_faces endpoint accepts:
+//
+// files
+// files[]
+//
+// We send one image per request using "files[]".
+// This avoids the PHP multipart duplicate-key problem.
+//
+
+$synced = 0;
+$failed = 0;
+$failedFiles = [];
+
+foreach ($faceFiles as $index => $filePath) {
+
+    $filename = basename($filePath);
+
+    $mimeType = 'image/jpeg';
+
+    if (function_exists('mime_content_type')) {
+
+        $detectedMime = @mime_content_type($filePath);
+
+        if ($detectedMime) {
+            $mimeType = $detectedMime;
+        }
+    }
+
+
+    $curlFile = curl_file_create(
+        $filePath,
+        $mimeType,
+        $filename
+    );
+
+
+    $postFields = [
+        'files[]' => $curlFile
+    ];
+
+
+    $ch = curl_init(
+        $FACE_SERVER . '/sync_faces'
+    );
+
+    curl_setopt_array($ch, [
+
+        CURLOPT_RETURNTRANSFER => true,
+
+        CURLOPT_POST => true,
+
+        CURLOPT_POSTFIELDS => $postFields,
+
+        CURLOPT_CONNECTTIMEOUT => 15,
+
+        CURLOPT_TIMEOUT => 30,
+
+        CURLOPT_FOLLOWLOCATION => true,
+
+        CURLOPT_HTTPHEADER => [
+            'Accept: application/json'
+        ]
+
+    ]);
+
+
+    $response = curl_exec($ch);
+
+    $curlError = curl_error($ch);
+
+    $httpCode = curl_getinfo(
+        $ch,
+        CURLINFO_HTTP_CODE
+    );
+
+    curl_close($ch);
+
+
+    $json = null;
+
+    if ($response !== false) {
+        $json = json_decode($response, true);
+    }
+
+
+    if (
+        $response !== false &&
+        $httpCode >= 200 &&
+        $httpCode < 300 &&
+        is_array($json) &&
+        !empty($json['success'])
+    ) {
+
+        $synced++;
+
+    } else {
+
+        $failed++;
+
+        $failedFiles[] = [
+            'file' => $filename,
+            'http_code' => $httpCode,
+            'error' => $curlError ?: (
+                is_array($json) && isset($json['error'])
+                    ? $json['error']
+                    : 'Unknown synchronization error'
+            )
+        ];
+    }
+
+
+    /*
+     * Small delay so Render is not flooded with requests.
+     */
+    usleep(50000);
+}
+
+
+// ============================================================
+// STEP 4: MAKE SURE EVERYTHING SYNCHRONIZED
+// ============================================================
+
+if ($failed > 0) {
+
+    echo json_encode([
+        'success' => false,
+        'error' => 'Some face images could not be synchronized to Render.',
+        'total_files' => $totalFiles,
+        'synced' => $synced,
+        'failed' => $failed,
+        'failed_files' => $failedFiles
+    ]);
+
+    exit;
+}
+
+
+// ============================================================
+// STEP 5: START TRAINING ON RENDER
+// ============================================================
+
+$trainResult = render_get_json(
+    $FACE_SERVER . '/train',
+    15
+);
+
+
+if (
+    !$trainResult['ok'] ||
+    !is_array($trainResult['data']) ||
+    empty($trainResult['data']['success'])
+) {
+
+    echo json_encode([
+        'success' => false,
+        'error' => 'Face images were synchronized, but Render could not start training.',
+        'sync' => [
+            'total' => $totalFiles,
+            'synced' => $synced,
+            'failed' => $failed
+        ],
+        'render_response' => $trainResult['data'] ?? $trainResult['raw'] ?? null
+    ]);
+
+    exit;
+}
+
+
+// ============================================================
+// ASYNC MODE
+// ============================================================
+//
+// Used by face_enroll.php:
+//
+// face_train_multi.php?async=1
+//
+// We synchronize first, then start Render training.
+//
+
+if (isset($_GET['async'])) {
+
+    echo json_encode([
+        'success' => true,
+        'mode' => 'async',
+        'message' => 'Face images synchronized and training started.',
+        'total_files' => $totalFiles,
+        'synced' => $synced
+    ]);
+
+    exit;
+}
+
+
+// ============================================================
+// STEP 6: WAIT FOR TRAINING TO FINISH
+// ============================================================
+
+$trainingResult = null;
+
+for ($i = 0; $i < 180; $i++) {
+
+    sleep(2);
+
+
+    $statusResult = render_get_json(
+        $FACE_SERVER . '/train/status',
+        15
+    );
+
+
+    if (
+        !$statusResult['ok'] ||
+        !is_array($statusResult['data'])
+    ) {
+        continue;
+    }
+
+
+    $status = $statusResult['data'];
+
+    $state = $status['state'] ?? 'unknown';
+
+
+    if ($state === 'done' || $state === 'error') {
+
+        $trainingResult = $status;
+
         break;
     }
 }
 
-if (!$parsed) {
-    echo json_encode(['success' => false, 'error' => 'Training timed out or returned no result']);
+
+// ============================================================
+// STEP 7: TRAINING TIMEOUT
+// ============================================================
+
+if ($trainingResult === null) {
+
+    echo json_encode([
+        'success' => false,
+        'error' => 'Training timed out while waiting for Render.',
+        'total_files' => $totalFiles,
+        'synced' => $synced
+    ]);
+
     exit;
 }
 
-// Helper text labels for the UI
-$parsed['labels'] = [
-    'lbph'      => $parsed['lbph']['ok']
-        ? ('Trained on ' . ($parsed['lbph']['samples'] ?? 0) . ' samples / '
-           . ($parsed['lbph']['students'] ?? 0) . ' students')
-        : 'Error: ' . ($parsed['lbph']['error'] ?? 'unknown'),
-    'fr_helper' => $parsed['fr_helper']['ok']
-        ? ('Built ' . ($parsed['fr_helper']['encodings'] ?? 0) . ' encodings')
-        : 'Skipped: ' . ($parsed['fr_helper']['error'] ?? 'unavailable'),
+
+// ============================================================
+// STEP 8: PROCESS TRAINING RESULT
+// ============================================================
+
+if (($trainingResult['state'] ?? '') === 'error') {
+
+    echo json_encode([
+        'success' => false,
+        'error' => $trainingResult['message'] ?? 'Training failed.',
+        'total_files' => $totalFiles,
+        'synced' => $synced,
+        'training' => $trainingResult
+    ]);
+
+    exit;
+}
+
+
+$result = $trainingResult['result'] ?? [];
+
+
+// ============================================================
+// LBPH RESULT
+// ============================================================
+
+$lbph = $result['lbph'] ?? [
+    'ok' => false,
+    'samples' => 0,
+    'students' => 0,
+    'error' => 'No LBPH result returned.'
 ];
 
-echo json_encode($parsed);
+
+// ============================================================
+// FISHERFACES RESULT
+// ============================================================
+
+$fisherfaces = $result['fisherfaces'] ?? [
+    'ok' => false,
+    'samples' => 0,
+    'students' => 0,
+    'error' => 'No Fisherfaces result returned.'
+];
+
+
+// ============================================================
+// UI LABELS
+// ============================================================
+
+$lbphLabel = $lbph['ok']
+
+    ? (
+        'Trained on ' .
+        ($lbph['samples'] ?? 0) .
+        ' samples / ' .
+        ($lbph['students'] ?? 0) .
+        ' students'
+    )
+
+    : (
+        'Error: ' .
+        ($lbph['error'] ?? 'unknown')
+    );
+
+
+$fisherLabel = $fisherfaces['ok']
+
+    ? (
+        'Trained on ' .
+        ($fisherfaces['samples'] ?? 0) .
+        ' samples / ' .
+        ($fisherfaces['students'] ?? 0) .
+        ' students'
+    )
+
+    : (
+        'Error: ' .
+        ($fisherfaces['error'] ?? 'unknown')
+    );
+
+
+// ============================================================
+// FINAL RESPONSE
+// ============================================================
+
+echo json_encode([
+
+    'success' => true,
+
+    'mode' => 'completed',
+
+    'message' =>
+        'Face images synchronized and models successfully retrained.',
+
+    'sync' => [
+
+        'total_files' => $totalFiles,
+
+        'synced' => $synced,
+
+        'failed' => $failed
+    ],
+
+    'lbph' => $lbph,
+
+    'fisherfaces' => $fisherfaces,
+
+    /*
+     * Keep these names too so older dashboard JavaScript
+     * does not immediately break.
+     */
+    'fr_helper' => $fisherfaces,
+
+    'labels' => [
+
+        'lbph' => $lbphLabel,
+
+        'fisherfaces' => $fisherLabel,
+
+        'fr_helper' => $fisherLabel
+    ]
+
+]);
+
 ?>
