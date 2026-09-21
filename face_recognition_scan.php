@@ -274,7 +274,7 @@ html,body{
 <body>
 <div class="header">
     <h1>📷 Face Attendance</h1>
-    <div class="event-badge">📅 <?php echo htmlspecialchars($event_name); ?> &nbsp;|&nbsp; <?php echo date('F d, Y'); ?></div>
+    <div class="event-badge">📅 <?php echo htmlspecialchars($event_name); ?> &nbsp;|&nbsp; <?php echo date('F d, Y'); ?><?php if(!$event_id): ?> &nbsp;|&nbsp; <span style="color:#FFD700;">Recognition Only</span><?php endif; ?></div>
     <?php if($isAdmin): ?>
     <a href="admin_dashboard.php" class="back-btn">← Dashboard</a>
     <?php else: ?>
@@ -375,6 +375,7 @@ const resultStatus=document.getElementById('resultStatus');
 
 // ── Timing data (moved here so it's available before loadAlreadyScanned) ──
 const _timing = <?php echo $timingJson; ?>;
+const EVENT_ID = <?php echo (int)$event_id; ?>;
 
 // ── Server readiness polling ──────────────────────────────────────────────
 let _serverReady   = false;
@@ -387,7 +388,7 @@ function beginScanning(){
         setTimeout(beginScanning, 500); // camera not ready yet — retry
         return;
     }
-    if(!isAnyWindowOpen()){
+    if(EVENT_ID !== 0 && !isAnyWindowOpen()){
         scanOverlay.textContent = '✅ Camera ready – click "Start Scanning"';
         return;
     }
@@ -738,7 +739,20 @@ async function doScan(){
         return;
     }
 
-    // Record attendance
+    // Recognition-only mode: identify the student without recording attendance.
+    if(EVENT_ID === 0){
+        const conf = (lbph && !lbph.error) ? Math.round(lbph.confidence || 0) : 0;
+        const quality = conf >= 90 ? 'Excellent' : conf >= 75 ? 'Good' : conf >= 60 ? 'Fair' : 'Low';
+        scanOverlay.textContent = `👤 Recognized: ${consensusName}`;
+        resultBox.className = 'result-inline success';
+        resultName.textContent = consensusName;
+        resultStatus.textContent = `LBPH: ${conf.toFixed(1)}% (${quality}) · Recognition only — no active event`;
+        cooldowns[consensusId] = Date.now();
+        scanInFlight = false;
+        return;
+    }
+
+    // Normal attendance mode
     scanOverlay.textContent = `✅ Recognized: ${consensusName} – recording…`;
     const att = await recordAttendance(consensusId);
 
@@ -834,7 +848,7 @@ function resetCards(){
 // ── Controls ──────────────────────────────────────────────────────────────
 startBtn.addEventListener('click', ()=>{
     if(!stream) return;
-    if(!isAnyWindowOpen()){
+    if(EVENT_ID !== 0 && !isAnyWindowOpen()){
         const info = getNextWindowInfo();
         scanOverlay.textContent = '🚫 Not time yet';
         resultBox.className = 'result-inline fail';
@@ -942,7 +956,11 @@ function checkWindow(){
 
     const active = allWindows.find(w => now >= w.s && now <= w.e);
 
-    if(active){
+    if(EVENT_ID === 0){
+        ws.textContent = '👤 Recognition Only — No Event';
+        ws.style.background = 'rgba(255,215,0,0.18)';
+        ws.style.color = '#FFD700';
+    } else if(active){
         const inLateZone = active.type === 'login' && active.lateAfter && now > active.lateAfter;
         ws.textContent = inLateZone
             ? '� ' + active.label + ' – Late Zone (+15m)'
@@ -963,8 +981,8 @@ function checkWindow(){
         }
     }
 
-    // Disable Start button visually when no window is active
-    if(!isAnyWindowOpen() && !isScanning){
+    // No event = recognition-only mode, so Start remains available.
+    if(EVENT_ID !== 0 && !isAnyWindowOpen() && !isScanning){
         startBtn.style.opacity = '0.4';
         startBtn.style.cursor = 'not-allowed';
         startBtn.title = '⏳ ' + getNextWindowInfo();
