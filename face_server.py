@@ -948,8 +948,13 @@ def sync_faces():
         )
 
         removed_old = 0
+        removed_models = []
 
         if replace_dataset:
+            # A replacement is a COMPLETE dataset reset.
+            # Remove all enrolled face images and all models trained
+            # from the previous dataset so old students cannot remain
+            # recognizable after a new dataset is synchronized.
             for old_file in os.listdir(FACES_DIR):
                 if not old_file.lower().endswith(".jpg"):
                     continue
@@ -967,9 +972,32 @@ def sync_faces():
                             flush=True
                         )
 
+            # Remove old trained models. They must not survive a complete
+            # face-dataset replacement.
+            for model_path in (TRAINER, FISHERFACES):
+                if os.path.isfile(model_path):
+                    try:
+                        os.remove(model_path)
+                        removed_models.append(os.path.basename(model_path))
+                    except Exception as e:
+                        print(
+                            f"[face_server] Could not remove old model "
+                            f"{model_path}: {e}",
+                            flush=True
+                        )
+
+            # Clear in-memory models too, otherwise the running Flask process
+            # could continue using the old models until the service restarts.
+            with _lock:
+                _lbph = None
+                _fisherfaces = None
+                _models_ready["lbph"] = False
+                _models_ready["fisherfaces"] = False
+
             print(
-                f"[face_server] Replaced Render face dataset. "
-                f"Removed {removed_old} old JPG files.",
+                f"[face_server] COMPLETE DATASET REPLACEMENT: "
+                f"removed {removed_old} old JPG files and "
+                f"{len(removed_models)} old model files.",
                 flush=True
             )
 
@@ -986,6 +1014,19 @@ def sync_faces():
                 uploaded_files.extend(request.files.getlist(key))
 
         if not uploaded_files:
+
+            if replace_dataset:
+                return jsonify({
+                    "success": True,
+                    "message": "Render face dataset and old trained models were cleared.",
+                    "saved": 0,
+                    "skipped": 0,
+                    "removed_old": removed_old,
+                    "removed_models": removed_models,
+                    "replaced_dataset": True,
+                    "cleanup_only": True,
+                    "files": []
+                })
 
             return jsonify({
                 "success": False,
@@ -1049,6 +1090,7 @@ def sync_faces():
             "saved": len(saved),
             "skipped": len(skipped),
             "removed_old": removed_old,
+            "removed_models": removed_models,
             "replaced_dataset": replace_dataset,
             "files": saved
         })
