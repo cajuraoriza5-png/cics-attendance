@@ -42,6 +42,7 @@ import traceback
 import threading
 import subprocess
 import time
+import re
 
 import numpy as np
 import cv2
@@ -1079,13 +1080,12 @@ def _do_train():
         # Count training images
         # ---------------------------------------------------------------------
 
-       import re
 
         image_files = [
-             f
-             for f in os.listdir(FACES_DIR)
-             if re.match(r"^\d+_\d+\.jpg$", f, re.IGNORECASE)
-    ]   
+            f
+            for f in os.listdir(FACES_DIR)
+            if re.match(r"^\d+_\d+\.jpg$", f, re.IGNORECASE)
+        ]
 
         if not image_files:
 
