@@ -47,22 +47,23 @@ pip install gunicorn
 
 ## Step-by-Step Training Process
 
-### Step 1: Enroll Students
+### Step 1: Students Register Their Accounts
 
-1. Go to your Admin Dashboard
-2. Click "Add Student"
-3. Fill in student details (first name, last name, student_id)
-4. Save the student
-5. Note the `id` assigned to the student
+1. Students go to the registration page (register.php)
+2. Students fill in their details (first name, last name, student_id, etc.)
+3. Students create their account with a password
+4. Students can now log in via student_login.php
 
-### Step 2: Capture Face Images
+### Step 2: Students Enroll Their Faces
 
-1. Go to "Face Enrollment" page
-2. Select the student from the dropdown
-3. Allow camera access
-4. Click "Capture Face" multiple times (10-20 times recommended)
-5. Each capture saves an image as `{user_id}_{index}.jpg`
-6. Verify images are saved in `faces/` directory
+1. Students log in to their Student Dashboard (student_dashboard.php)
+2. Students click on "Face Enrollment" or "Register Face"
+3. Allow camera access when prompted
+4. Position face in camera frame
+5. Click "Capture Face" **10-20 times** from different angles (slight head turns, different lighting)
+6. Each capture is **automatically saved** to the `faces/` directory as `{user_id}_{index}.jpg`
+7. Each capture is also stored in the database (face_data table) for backup
+8. Students can verify their face registration status on their dashboard
 
 ### Step 3: Verify Face Images
 
@@ -85,7 +86,7 @@ Expected result:
 - `total_records` should equal `unique_filenames`
 - `unique_students` should be ≥ 2 (for Fisherfaces)
 
-### Step 4: Train Models (Local Development)
+### Step 4: Train Models (Sync to Render and Train)
 
 **Option A: Via Admin Dashboard**
 1. Go to Admin Dashboard
