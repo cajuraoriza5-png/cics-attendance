@@ -274,7 +274,7 @@ html,body{
 <body>
 <div class="header">
     <h1>📷 Face Attendance</h1>
-    <div class="event-badge">📅 <?php echo htmlspecialchars($event_name); ?><?php if(!$event_id): ?> &nbsp;|&nbsp; 👤 Recognition Only<?php endif; ?> &nbsp;|&nbsp; <?php echo date('F d, Y'); ?></div>
+    <div class="event-badge">📅 <?php echo htmlspecialchars($event_name); ?> &nbsp;|&nbsp; <?php echo date('F d, Y'); ?></div>
     <?php if($isAdmin): ?>
     <a href="admin_dashboard.php" class="back-btn">← Dashboard</a>
     <?php else: ?>
@@ -363,7 +363,6 @@ $showAfternoon  = ($scanEventType !== 'Morning Only');
 </div>
 
 <script>
-const EVENT_ID = <?php echo (int)$event_id; ?>;
 const video      = document.getElementById('video');
 const bboxCanvas = document.getElementById('bboxCanvas');
 const scanOverlay= document.getElementById('scanOverlay');
@@ -388,14 +387,22 @@ function beginScanning(){
         setTimeout(beginScanning, 500); // camera not ready yet — retry
         return;
     }
-    if(!isAnyWindowOpen()){
+
+    // No event today = Recognition Only mode.
+    // With an event, the normal attendance time-window rules apply.
+    const recognitionOnly = <?php echo $event_id ? 'false' : 'true'; ?>;
+
+    if(!recognitionOnly && !isAnyWindowOpen()){
         scanOverlay.textContent = '✅ Camera ready – click "Start Scanning"';
         return;
     }
+
     isScanning = true;
     startBtn.disabled = true;
     stopBtn.disabled  = false;
-    scanOverlay.textContent = '🔍 Scanning…';
+    scanOverlay.textContent = recognitionOnly
+        ? '🔍 Recognition Only – Scanning…'
+        : '🔍 Scanning…';
     startFaceDetectionLoop();
     scanTimer = setInterval(doScan, 1500);
     doScan();
@@ -682,31 +689,38 @@ async function doScan(){
         return;
     }
 
-    // ── Recognition: LBPH + Fisherfaces hybrid ─────────────────────────────
+    // ── Recognition: single LBPH result (face_recognition boosts internally) ───
     let consensusId = null, consensusName = null;
 
-    const lbph = data.lbph || {};
-    const lbphConf = Number(lbph.lbph_confidence ?? lbph.confidence ?? 0);
-    const fisherConf = Number(lbph.fisherfaces_confidence ?? 0);
-    const algorithm = String(lbph.algorithm || 'lbph').toLowerCase();
-
-    // Fisherfaces is preferred when the server says it matched.
-    // Otherwise use LBPH when LBPH reached the recognition threshold.
-    if(lbph.matched && lbph.id > 0 && algorithm === 'fisherfaces'){
-        consensusId = lbph.id;
-        consensusName = lbph.name || ('ID:' + lbph.id);
-    } else if(lbph.matched && lbph.id > 0 && lbph.confidence >= 75){
-        consensusId = lbph.id;
+    const lbph = data.lbph;
+    if(lbph && !lbph.error && lbph.matched && lbph.id > 0 && lbph.confidence >= 75){
+        consensusId   = lbph.id;
         consensusName = lbph.name || ('ID:' + lbph.id);
     }
 
-    const algoInfo = `LBPH: ${lbphConf.toFixed(1)}% | Fisherfaces: ${fisherConf.toFixed(1)}%`;
-
     if(!consensusId){
+        const c = lbph?.confidence;
+        
+        // Build algorithm summary even for low confidence
+        let algoInfo = '';
+        const algo = lbph?.algorithm || 'lbph';
+        const lbphConf = lbph?.lbph_confidence || 0;
+        const cnnConf = lbph?.cnn_confidence || 0;
+        
+        if (algo === 'dlib_cnn') {
+            algoInfo = `CNN: ${cnnConf.toFixed(1)}%`;
+            if (lbphConf > 0) algoInfo += ` | LBPH: ${lbphConf.toFixed(1)}%`;
+        } else {
+            algoInfo = `LBPH: ${lbphConf.toFixed(1)}%`;
+            if (cnnConf > 0) algoInfo += ` | CNN: ${cnnConf.toFixed(1)}%`;
+        }
+        
         scanOverlay.textContent = `❓ Face detected – ${algoInfo} (need ≥75%)`;
         resultBox.className='result-inline fail';
         resultName.textContent = 'Not recognized';
-        resultStatus.textContent = `${algoInfo} – need ≥75% for match`;
+        resultStatus.textContent = (c != null && !lbph?.error)
+            ? `${algoInfo} – need ≥75% for match`
+            : (lbph?.error || 'No match found');
         scanInFlight = false;
         return;
     }
@@ -732,27 +746,39 @@ async function doScan(){
         return;
     }
 
-    // Recognition-only mode: no event means recognize the student but do not record attendance.
-    if(EVENT_ID === 0){
-        scanOverlay.textContent = `👤 Recognized: ${consensusName} – Recognition Only`;
-        resultBox.className='result-inline success';
-        resultName.textContent = consensusName;
-        resultStatus.textContent = `${algoInfo} · Algorithm: ${algorithm === 'fisherfaces' ? 'Fisherfaces' : 'LBPH'}`;
-        scanInFlight = false;
-        return;
-    }
-
-    // Record attendance only when an event exists.
+    // Record attendance
     scanOverlay.textContent = `✅ Recognized: ${consensusName} – recording…`;
     const att = await recordAttendance(consensusId);
 
-    const conf = Number(lbph.confidence || lbphConf || 0);
+    const conf = (lbph && !lbph.error) ? Math.round(lbph.confidence || 0) : 0;
     const quality = conf >= 90 ? 'Excellent' : conf >= 75 ? 'Good' : conf >= 60 ? 'Fair' : 'Low';
     
-    // Build algorithm summary for the current hybrid recognizer.
-    let algoSummary = `${algoInfo} (${quality})`;
-    if(algorithm === 'fisherfaces') algoSummary += ' · Fisherfaces selected';
-    else if(lbph.boosted) algoSummary += ' · Hybrid agreement';
+    // Build algorithm summary showing hybrid system details
+    let algoSummary = '';
+    const algo = lbph?.algorithm || 'lbph';
+    const lbphConf = lbph?.lbph_confidence || 0;
+    const cnnConf = lbph?.cnn_confidence || 0;
+    
+    if (algo === 'dlib_cnn') {
+        // dlib CNN was used (more accurate)
+        algoSummary = `CNN: ${cnnConf.toFixed(1)}%`;
+        if (lbph?.boosted) {
+            algoSummary += ` (Boosted by LBPH: ${lbphConf.toFixed(1)}%)`;
+        } else if (lbphConf > 0) {
+            algoSummary += ` | LBPH: ${lbphConf.toFixed(1)}%`;
+        }
+    } else if (algo === 'lbph') {
+        // LBPH was used
+        algoSummary = `LBPH: ${lbphConf.toFixed(1)}% (${quality})`;
+        if (cnnConf > 0) {
+            algoSummary += ` | CNN: ${cnnConf.toFixed(1)}%`;
+            if (lbph?.disagreement) {
+                algoSummary += ' [Disagreement]';
+            }
+        }
+    } else {
+        algoSummary = `Confidence: ${conf}% (${quality})`;
+    }
 
     if(att.success){
         cooldowns[consensusId] = now;
@@ -816,7 +842,12 @@ function resetCards(){
 // ── Controls ──────────────────────────────────────────────────────────────
 startBtn.addEventListener('click', ()=>{
     if(!stream) return;
-    if(EVENT_ID !== 0 && !isAnyWindowOpen()){
+
+    // No event today = Recognition Only mode.
+    // Allow face recognition to run, but attendance recording remains disabled.
+    const recognitionOnly = <?php echo $event_id ? 'false' : 'true'; ?>;
+
+    if(!recognitionOnly && !isAnyWindowOpen()){
         const info = getNextWindowInfo();
         scanOverlay.textContent = '🚫 Not time yet';
         resultBox.className = 'result-inline fail';
@@ -825,6 +856,7 @@ startBtn.addEventListener('click', ()=>{
         showToast('⏳ ' + info, 4000);
         return;
     }
+
     _autoScan = true;
     beginScanning();
 });
@@ -902,16 +934,6 @@ function isAnyWindowOpen(){
 
 function getNextWindowInfo(){
     const now = nowClean();
-    if(EVENT_ID === 0){
-        ws.textContent = '👤 Recognition Only — No Event';
-        ws.style.background = 'rgba(255,215,0,0.18)';
-        ws.style.color = '#FFD700';
-        startBtn.style.opacity = '1';
-        startBtn.style.cursor = 'pointer';
-        startBtn.title = 'Recognition only — attendance is not recorded';
-        return;
-    }
-
     const allWindows = buildWindows({morning_login:true,morning_logout:true,afternoon_login:true,afternoon_logout:true});
 
     const active = allWindows.find(w => now >= w.s && now <= w.e);
@@ -955,15 +977,18 @@ function checkWindow(){
         }
     }
 
-    // Disable Start only when an event exists and no attendance window is active.
-    if(EVENT_ID !== 0 && !isAnyWindowOpen() && !isScanning){
+    // Disable Start button visually only when an event exists but its
+    // attendance window is closed. With no event, Recognition Only mode
+    // must remain available.
+    const recognitionOnly = <?php echo $event_id ? 'false' : 'true'; ?>;
+    if(!recognitionOnly && !isAnyWindowOpen() && !isScanning){
         startBtn.style.opacity = '0.4';
         startBtn.style.cursor = 'not-allowed';
         startBtn.title = '⏳ ' + getNextWindowInfo();
     } else {
         startBtn.style.opacity = '1';
         startBtn.style.cursor = 'pointer';
-        startBtn.title = '';
+        startBtn.title = recognitionOnly ? 'Recognition Only – no event today' : '';
     }
 }
 checkWindow();
