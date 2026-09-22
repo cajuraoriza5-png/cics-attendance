@@ -2,7 +2,7 @@
 /**
  * face_train_multi.php
  *
- * ONLINE TRAINING FLOW
+ * ONLINE FACE TRAINING FLOW
  *
  * InfinityFree
  *      |
@@ -10,7 +10,7 @@
  *      v
  * Render /sync_faces
  *      |
- *      | 2. Store faces on Render
+ *      | 2. Store current face dataset on Render
  *      v
  * Render /train
  *      |
@@ -63,15 +63,10 @@ function render_get($url, $timeout = 30)
     $ch = curl_init($url);
 
     curl_setopt_array($ch, [
-
         CURLOPT_RETURNTRANSFER => true,
-
         CURLOPT_HTTPGET => true,
-
         CURLOPT_CONNECTTIMEOUT => 15,
-
         CURLOPT_TIMEOUT => $timeout,
-
         CURLOPT_FOLLOWLOCATION => true,
 
         CURLOPT_HTTPHEADER => [
@@ -79,9 +74,7 @@ function render_get($url, $timeout = 30)
         ],
 
         CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
-
         CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4
-
     ]);
 
     $response = curl_exec($ch);
@@ -128,7 +121,6 @@ function render_post_json($url, $payload = [], $timeout = 30)
     $jsonPayload = json_encode($payload);
 
     curl_setopt_array($ch, [
-
         CURLOPT_RETURNTRANSFER => true,
 
         CURLOPT_POST => true,
@@ -149,7 +141,6 @@ function render_post_json($url, $payload = [], $timeout = 30)
         CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
 
         CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4
-
     ]);
 
     $response = curl_exec($ch);
@@ -196,12 +187,16 @@ function check_render($server)
      * Give Render several attempts to wake up.
      */
 
+    $lastResult = null;
+
     for ($i = 1; $i <= 6; $i++) {
 
         $result = render_get(
             $server . '/status',
             30
         );
+
+        $lastResult = $result;
 
         if ($result['ok']) {
 
@@ -216,7 +211,7 @@ function check_render($server)
 
     return [
         'ready' => false,
-        'result' => $result
+        'result' => $lastResult
     ];
 }
 
@@ -234,7 +229,6 @@ if (!$renderCheck['ready']) {
     $r = $renderCheck['result'];
 
     echo json_encode([
-
         'success' => false,
 
         'error' =>
@@ -250,7 +244,6 @@ if (!$renderCheck['ready']) {
 
         'response' =>
             $r['raw'] ?? ''
-
     ]);
 
     exit;
@@ -264,12 +257,10 @@ if (!$renderCheck['ready']) {
 if (!is_dir($facesDir)) {
 
     echo json_encode([
-
         'success' => false,
 
         'error' =>
             'The faces directory does not exist.'
-
     ]);
 
     exit;
@@ -334,12 +325,10 @@ $totalFiles = count(
 if ($totalFiles === 0) {
 
     echo json_encode([
-
         'success' => false,
 
         'error' =>
             'No JPG face images were found in the faces directory.'
-
     ]);
 
     exit;
@@ -349,16 +338,6 @@ if ($totalFiles === 0) {
 // ============================================================
 // STEP 4: SYNCHRONIZE FACES TO RENDER
 // ============================================================
-//
-// Send multiple images in one request.
-//
-// The Render endpoint accepts:
-//
-// files
-// files[]
-//
-// This is much faster than sending 1 request per image.
-//
 
 $synced = 0;
 
@@ -367,243 +346,211 @@ $failed = 0;
 $failedFiles = [];
 
 
-// Number of images per request
-$batchSize = 20;
+// ------------------------------------------------------------
+// IMPORTANT
+// ------------------------------------------------------------
+// The first successful upload uses:
+//
+//     replace=1
+//
+// This tells Render to delete its old face dataset first.
+//
+// After the first successful upload:
+//
+//     replace=0
+//
+// Therefore Render will contain only the current
+// InfinityFree face dataset.
+// ------------------------------------------------------------
+
+$replaceDataset = true;
 
 
-// Split images into batches
-$batches = array_chunk(
-    $faceFiles,
-    $batchSize
-);
+// ------------------------------------------------------------
+// Upload one image per request
+// ------------------------------------------------------------
+// This avoids problems with PHP/cURL multipart handling
+// when sending many files using the same "files[]" field.
+// ------------------------------------------------------------
 
+foreach ($faceFiles as $filePath) {
 
-foreach ($batches as $batch) {
+    $filename =
+        basename($filePath);
 
-    $postFields = [];
+    $mimeType = 'image/jpeg';
 
-    foreach ($batch as $filePath) {
+    if (
+        function_exists(
+            'mime_content_type'
+        )
+    ) {
 
-        $filename =
-            basename($filePath);
-
-        $mimeType = 'image/jpeg';
-
-        if (
-            function_exists(
-                'mime_content_type'
-            )
-        ) {
-
-            $detected =
-                @mime_content_type(
-                    $filePath
-                );
-
-            if ($detected) {
-                $mimeType = $detected;
-            }
-        }
-
-        $postFields['files[]'][] =
-            curl_file_create(
-                $filePath,
-                $mimeType,
-                $filename
+        $detected =
+            @mime_content_type(
+                $filePath
             );
+
+        if ($detected) {
+            $mimeType = $detected;
+        }
     }
 
 
-    /*
-     * PHP/cURL expects multipart fields.
-     *
-     * Because the same field name is required,
-     * construct the array manually.
-     */
+    // --------------------------------------------------------
+    // Create CURL file
+    // --------------------------------------------------------
 
-    $multipart = [];
-
-    foreach ($batch as $filePath) {
-
-        $filename =
-            basename($filePath);
-
-        $mimeType = 'image/jpeg';
-
-        if (
-            function_exists(
-                'mime_content_type'
-            )
-        ) {
-
-            $detected =
-                @mime_content_type(
-                    $filePath
-                );
-
-            if ($detected) {
-                $mimeType = $detected;
-            }
-        }
-
-        $multipart[] =
-            curl_file_create(
-                $filePath,
-                $mimeType,
-                $filename
-            );
-    }
-
-
-    /*
-     * Important:
-     *
-     * PHP's normal associative array cannot safely contain
-     * several identical "files[]" keys.
-     *
-     * Therefore send one file at a time if necessary.
-     */
-
-    foreach ($batch as $filePath) {
-
-        $filename =
-            basename($filePath);
-
-        $mimeType = 'image/jpeg';
-
-        if (
-            function_exists(
-                'mime_content_type'
-            )
-        ) {
-
-            $detected =
-                @mime_content_type(
-                    $filePath
-                );
-
-            if ($detected) {
-                $mimeType = $detected;
-            }
-        }
-
-
-        $curlFile =
-            curl_file_create(
-                $filePath,
-                $mimeType,
-                $filename
-            );
-
-
-        $uploadFields = [
-            'files[]' => $curlFile
-        ];
-
-
-        $ch = curl_init(
-            $FACE_SERVER .
-            '/sync_faces'
+    $curlFile =
+        curl_file_create(
+            $filePath,
+            $mimeType,
+            $filename
         );
 
 
-        curl_setopt_array($ch, [
+    // --------------------------------------------------------
+    // Upload fields
+    // --------------------------------------------------------
 
-            CURLOPT_RETURNTRANSFER => true,
-
-            CURLOPT_POST => true,
-
-            CURLOPT_POSTFIELDS =>
-                $uploadFields,
-
-            CURLOPT_CONNECTTIMEOUT =>
-                15,
-
-            CURLOPT_TIMEOUT =>
-                45,
-
-            CURLOPT_FOLLOWLOCATION =>
-                true,
-
-            CURLOPT_HTTPHEADER => [
-                'Accept: application/json'
-            ],
-
-            CURLOPT_HTTP_VERSION =>
-                CURL_HTTP_VERSION_1_1,
-
-            CURLOPT_IPRESOLVE =>
-                CURL_IPRESOLVE_V4
-
-        ]);
+    $uploadFields = [
+        'files[]' => $curlFile
+    ];
 
 
-        $response =
-            curl_exec($ch);
+    // --------------------------------------------------------
+    // FIRST SUCCESSFUL UPLOAD ONLY
+    // --------------------------------------------------------
 
-        $curlError =
-            curl_error($ch);
+    if ($replaceDataset) {
 
-        $httpCode =
-            curl_getinfo(
-                $ch,
-                CURLINFO_HTTP_CODE
-            );
-
-        curl_close($ch);
-
-
-        $json = null;
-
-        if ($response !== false) {
-
-            $json =
-                json_decode(
-                    $response,
-                    true
-                );
-        }
-
-
-        if (
-            $response !== false &&
-            $httpCode >= 200 &&
-            $httpCode < 300 &&
-            is_array($json) &&
-            !empty($json['success'])
-        ) {
-
-            $synced++;
-
-        } else {
-
-            $failed++;
-
-            $failedFiles[] = [
-
-                'file' =>
-                    $filename,
-
-                'http_code' =>
-                    $httpCode,
-
-                'error' =>
-                    $curlError ?:
-                    (
-                        is_array($json) &&
-                        isset($json['error'])
-                            ? $json['error']
-                            : 'Unknown upload error'
-                    )
-
-            ];
-        }
-
-        /*
-         * Small delay.
-         */
-        usleep(100000);
+        $uploadFields['replace'] = '1';
     }
+
+
+    // --------------------------------------------------------
+    // Send to Render
+    // --------------------------------------------------------
+
+    $ch = curl_init(
+        $FACE_SERVER .
+        '/sync_faces'
+    );
+
+    curl_setopt_array($ch, [
+
+        CURLOPT_RETURNTRANSFER => true,
+
+        CURLOPT_POST => true,
+
+        CURLOPT_POSTFIELDS =>
+            $uploadFields,
+
+        CURLOPT_CONNECTTIMEOUT =>
+            15,
+
+        CURLOPT_TIMEOUT =>
+            45,
+
+        CURLOPT_FOLLOWLOCATION =>
+            true,
+
+        CURLOPT_HTTPHEADER => [
+            'Accept: application/json'
+        ],
+
+        CURLOPT_HTTP_VERSION =>
+            CURL_HTTP_VERSION_1_1,
+
+        CURLOPT_IPRESOLVE =>
+            CURL_IPRESOLVE_V4
+    ]);
+
+
+    $response =
+        curl_exec($ch);
+
+    $curlError =
+        curl_error($ch);
+
+    $httpCode =
+        curl_getinfo(
+            $ch,
+            CURLINFO_HTTP_CODE
+        );
+
+    curl_close($ch);
+
+
+    // --------------------------------------------------------
+    // Decode response
+    // --------------------------------------------------------
+
+    $json = null;
+
+    if ($response !== false) {
+
+        $json =
+            json_decode(
+                $response,
+                true
+            );
+    }
+
+
+    // --------------------------------------------------------
+    // SUCCESS
+    // --------------------------------------------------------
+
+    if (
+        $response !== false &&
+        $httpCode >= 200 &&
+        $httpCode < 300 &&
+        is_array($json) &&
+        !empty($json['success'])
+    ) {
+
+        $synced++;
+
+
+        // ----------------------------------------------------
+        // VERY IMPORTANT:
+        //
+        // Only the first successful upload replaces
+        // the old Render dataset.
+        // ----------------------------------------------------
+
+        $replaceDataset = false;
+
+    } else {
+
+        $failed++;
+
+        $failedFiles[] = [
+
+            'file' =>
+                $filename,
+
+            'http_code' =>
+                $httpCode,
+
+            'error' =>
+                $curlError ?:
+                (
+                    is_array($json) &&
+                    isset($json['error'])
+                        ? $json['error']
+                        : 'Unknown upload error'
+                )
+        ];
+    }
+
+
+    // --------------------------------------------------------
+    // Small delay to avoid hammering Render
+    // --------------------------------------------------------
+
+    usleep(100000);
 }
 
 
@@ -631,7 +578,6 @@ if ($failed > 0) {
 
         'failed_files' =>
             $failedFiles
-
     ]);
 
     exit;
@@ -641,8 +587,6 @@ if ($failed > 0) {
 // ============================================================
 // STEP 6: START RENDER TRAINING
 // ============================================================
-//
-// IMPORTANT:
 //
 // /train is POST.
 //
@@ -685,7 +629,6 @@ if (
 
         'render_response' =>
             $trainResult['raw'] ?? ''
-
     ]);
 
     exit;
@@ -725,7 +668,6 @@ if (
 
         'failed' =>
             $failed
-
     ]);
 
     exit;
@@ -738,11 +680,15 @@ if (
 //
 // Used when this file is called without ?async=1.
 //
+// Wait for Render training to finish.
+//
+// Maximum:
+// 180 checks x 2 seconds
+// = approximately 6 minutes
+//
 
 $trainingResult = null;
 
-
-// Maximum 6 minutes
 for (
     $i = 0;
     $i < 180;
@@ -811,7 +757,6 @@ if (
 
         'synced' =>
             $synced
-
     ]);
 
     exit;
@@ -843,7 +788,6 @@ if (
 
         'training' =>
             $trainingResult
-
     ]);
 
     exit;
@@ -875,7 +819,6 @@ $lbph =
 
         'error' =>
             'No LBPH result returned.'
-
     ];
 
 
@@ -895,7 +838,6 @@ $fisherfaces =
 
         'error' =>
             'No Fisherfaces result returned.'
-
     ];
 
 
@@ -964,7 +906,6 @@ echo json_encode([
 
         'failed' =>
             $failed
-
     ],
 
     'lbph' =>
@@ -973,11 +914,17 @@ echo json_encode([
     'fisherfaces' =>
         $fisherfaces,
 
+
     /*
      * Compatibility with older dashboard code.
+     *
+     * Older code may still refer to "fr_helper".
+     * We map it to Fisherfaces.
      */
+
     'fr_helper' =>
         $fisherfaces,
+
 
     'labels' => [
 
@@ -989,7 +936,6 @@ echo json_encode([
 
         'fr_helper' =>
             $fisherLabel
-
     ]
 
 ]);
