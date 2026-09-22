@@ -973,15 +973,17 @@ def sync_faces():
                 flush=True
             )
 
-        uploaded_files = request.files.getlist(
-            "files"
-        )
+        # Accept the normal Flask keys plus indexed multipart keys such as
+        # files[0], files[1], ... . PHP/cURL uses the indexed form when
+        # sending several CURLFile objects in one request.
+        uploaded_files = []
 
-        if not uploaded_files:
+        uploaded_files.extend(request.files.getlist("files"))
+        uploaded_files.extend(request.files.getlist("files[]"))
 
-            uploaded_files = request.files.getlist(
-                "files[]"
-            )
+        for key in request.files.keys():
+            if key.startswith("files[") and key.endswith("]") and key not in ("files[]",):
+                uploaded_files.extend(request.files.getlist(key))
 
         if not uploaded_files:
 

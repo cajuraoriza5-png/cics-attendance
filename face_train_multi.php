@@ -2,43 +2,32 @@
 /**
  * face_train_multi.php
  *
- * ONLINE FACE TRAINING FLOW
+ * FIXED ONLINE TRAINING FLOW
  *
- * InfinityFree
- *      |
- *      | 1. Read enrolled JPG faces
- *      v
- * Render /sync_faces
- *      |
- *      | 2. Store current face dataset on Render
- *      v
- * Render /train
- *      |
- *      | 3. Train
- *      v
- * LBPH + Fisherfaces
+ * InfinityFree PHP does NOT upload every face image in one long request.
+ * The browser calls this file repeatedly in small batches.
  *
- * IMPORTANT:
- * InfinityFree cannot run Python.
+ * Each request:
+ *   1. Reads only one batch of local JPG files.
+ *   2. Sends that batch to Render /sync_faces in ONE HTTP request.
+ *   3. Returns immediately with the next offset.
+ *
+ * The final batch starts Render /train. Render performs the actual
+ * LBPH + Fisherfaces training in its background thread.
+ *
+ * This prevents the old problem where InfinityFree PHP stayed alive while
+ * making hundreds of individual cURL requests and was eventually killed.
  */
 
-header('Content-Type: application/json');
+header('Content-Type: application/json; charset=utf-8');
 
 @set_time_limit(0);
 @ini_set('memory_limit', '128M');
 @ignore_user_abort(true);
 
-
-// ============================================================
-// CONFIGURATION
-// ============================================================
-
 $config = require __DIR__ . '/config.php';
 
-if (
-    !isset($config['python_service']) ||
-    !isset($config['python_service']['url'])
-) {
+if (!isset($config['python_service']['url'])) {
     echo json_encode([
         'success' => false,
         'error' => 'Python service URL is not configured.'
@@ -46,898 +35,328 @@ if (
     exit;
 }
 
-$FACE_SERVER = rtrim(
-    $config['python_service']['url'],
-    '/'
-);
-
+$FACE_SERVER = rtrim($config['python_service']['url'], '/');
 $facesDir = __DIR__ . '/faces';
 
+/*
+ * These limits keep each InfinityFree request reasonably small.
+ * 100 files is the maximum count, but the byte limit normally stops
+ * the batch earlier. This is deliberately below InfinityFree's
+ * documented 30 MB maximum POST size seen on current free hosting.
+ */
+$MAX_BATCH_FILES = 100;
+$MAX_BATCH_BYTES = 12 * 1024 * 1024; // 12 MB
 
-// ============================================================
-// HELPER: GET REQUEST
-// ============================================================
-
-function render_get($url, $timeout = 30)
+function render_get_json($url, $timeout = 20)
 {
     $ch = curl_init($url);
 
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_HTTPGET => true,
-        CURLOPT_CONNECTTIMEOUT => 15,
+        CURLOPT_CONNECTTIMEOUT => 10,
         CURLOPT_TIMEOUT => $timeout,
         CURLOPT_FOLLOWLOCATION => true,
-
         CURLOPT_HTTPHEADER => [
             'Accept: application/json'
         ],
-
         CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
         CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4
     ]);
 
     $response = curl_exec($ch);
-
     $error = curl_error($ch);
-
-    $code = curl_getinfo(
-        $ch,
-        CURLINFO_HTTP_CODE
-    );
-
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
     return [
-        'ok' => (
-            $response !== false &&
-            $code >= 200 &&
-            $code < 300
-        ),
-
+        'ok' => ($response !== false && $code >= 200 && $code < 300),
         'code' => $code,
-
         'error' => $error,
-
         'raw' => $response,
-
-        'data' => (
-            $response !== false
-                ? json_decode($response, true)
-                : null
-        )
+        'data' => ($response !== false ? json_decode($response, true) : null)
     ];
 }
-
-
-// ============================================================
-// HELPER: POST JSON
-// ============================================================
 
 function render_post_json($url, $payload = [], $timeout = 30)
 {
     $ch = curl_init($url);
-
     $jsonPayload = json_encode($payload);
 
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
-
         CURLOPT_POST => true,
-
         CURLOPT_POSTFIELDS => $jsonPayload,
-
-        CURLOPT_CONNECTTIMEOUT => 15,
-
+        CURLOPT_CONNECTTIMEOUT => 10,
         CURLOPT_TIMEOUT => $timeout,
-
         CURLOPT_FOLLOWLOCATION => true,
-
         CURLOPT_HTTPHEADER => [
             'Content-Type: application/json',
             'Accept: application/json'
         ],
-
         CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
-
         CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4
     ]);
 
     $response = curl_exec($ch);
-
     $error = curl_error($ch);
-
-    $code = curl_getinfo(
-        $ch,
-        CURLINFO_HTTP_CODE
-    );
-
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
     return [
-        'ok' => (
-            $response !== false &&
-            $code >= 200 &&
-            $code < 300
-        ),
-
+        'ok' => ($response !== false && $code >= 200 && $code < 300),
         'code' => $code,
-
         'error' => $error,
-
         'raw' => $response,
-
-        'data' => (
-            $response !== false
-                ? json_decode($response, true)
-                : null
-        )
+        'data' => ($response !== false ? json_decode($response, true) : null)
     ];
 }
 
-
-// ============================================================
-// HELPER: CHECK RENDER
-// ============================================================
-
-function check_render($server)
+function fail_json($message, $extra = [])
 {
-    /*
-     * Render free services may sleep.
-     * Give Render several attempts to wake up.
-     */
-
-    $lastResult = null;
-
-    for ($i = 1; $i <= 6; $i++) {
-
-        $result = render_get(
-            $server . '/status',
-            30
-        );
-
-        $lastResult = $result;
-
-        if ($result['ok']) {
-
-            return [
-                'ready' => true,
-                'result' => $result
-            ];
-        }
-
-        sleep(5);
-    }
-
-    return [
-        'ready' => false,
-        'result' => $lastResult
-    ];
+    echo json_encode(array_merge([
+        'success' => false,
+        'error' => $message
+    ], $extra));
+    exit;
 }
 
+/* -------------------------------------------------------------
+ * Only the new batch API is allowed.
+ * ------------------------------------------------------------- */
+$batchMode = isset($_GET['batch']) && (string)$_GET['batch'] === '1';
 
-// ============================================================
-// STEP 1: CHECK RENDER
-// ============================================================
+if (!$batchMode) {
+    fail_json(
+        'The old long-running training request is disabled. ' .
+        'Use the Re-train Models button so the dataset is synchronized in batches.'
+    );
+}
 
-$renderCheck = check_render(
-    $FACE_SERVER
+$offset = isset($_GET['offset']) ? max(0, intval($_GET['offset'])) : 0;
+$requestedLimit = isset($_GET['limit']) ? intval($_GET['limit']) : $MAX_BATCH_FILES;
+$requestedLimit = max(1, min($MAX_BATCH_FILES, $requestedLimit));
+$replaceDataset = isset($_GET['replace']) && in_array(
+    strtolower((string)$_GET['replace']),
+    ['1', 'true', 'yes'],
+    true
 );
 
-if (!$renderCheck['ready']) {
-
-    $r = $renderCheck['result'];
-
-    echo json_encode([
-        'success' => false,
-
-        'error' =>
-            'InfinityFree could not connect to the Render face server.',
-
-        'server' => $FACE_SERVER,
-
-        'http_code' =>
-            $r['code'] ?? 0,
-
-        'curl_error' =>
-            $r['error'] ?? '',
-
-        'response' =>
-            $r['raw'] ?? ''
-    ]);
-
-    exit;
-}
-
-
-// ============================================================
-// STEP 2: CHECK LOCAL FACES DIRECTORY
-// ============================================================
-
+/* -------------------------------------------------------------
+ * Check local dataset.
+ * ------------------------------------------------------------- */
 if (!is_dir($facesDir)) {
-
-    echo json_encode([
-        'success' => false,
-
-        'error' =>
-            'The faces directory does not exist.'
-    ]);
-
-    exit;
+    fail_json('The faces directory does not exist.');
 }
-
-
-// ============================================================
-// STEP 3: FIND ALL JPG FACE IMAGES
-// ============================================================
 
 $faceFiles = [];
-
 $files = scandir($facesDir);
 
-foreach ($files as $file) {
+if ($files === false) {
+    fail_json('Unable to read the faces directory.');
+}
 
-    if (
-        $file === '.' ||
-        $file === '..'
-    ) {
+foreach ($files as $file) {
+    if ($file === '.' || $file === '..') {
         continue;
     }
 
-    $fullPath =
-        $facesDir .
-        DIRECTORY_SEPARATOR .
-        $file;
+    $fullPath = $facesDir . DIRECTORY_SEPARATOR . $file;
 
     if (!is_file($fullPath)) {
         continue;
     }
 
-    $extension =
-        strtolower(
-            pathinfo(
-                $file,
-                PATHINFO_EXTENSION
-            )
-        );
-
-    if ($extension !== 'jpg') {
+    if (strtolower(pathinfo($file, PATHINFO_EXTENSION)) !== 'jpg') {
         continue;
     }
 
     $faceFiles[] = $fullPath;
 }
 
-sort(
-    $faceFiles,
-    SORT_NATURAL
-);
-
-$totalFiles = count(
-    $faceFiles
-);
-
-
-// ============================================================
-// NO FACES
-// ============================================================
+sort($faceFiles, SORT_NATURAL);
+$totalFiles = count($faceFiles);
 
 if ($totalFiles === 0) {
-
-    echo json_encode([
-        'success' => false,
-
-        'error' =>
-            'No JPG face images were found in the faces directory.'
-    ]);
-
-    exit;
+    fail_json('No JPG face images were found in the faces directory.');
 }
 
+if ($offset >= $totalFiles) {
+    fail_json('The requested batch offset is outside the face dataset.', [
+        'total_files' => $totalFiles,
+        'offset' => $offset
+    ]);
+}
 
-// ============================================================
-// STEP 4: SYNCHRONIZE FACES TO RENDER
-// ============================================================
+/* -------------------------------------------------------------
+ * Check Render only when needed. The request itself can also wake
+ * the Render service, so do not waste six long health-check attempts.
+ * ------------------------------------------------------------- */
+$serverCheck = render_get_json($FACE_SERVER . '/status', 20);
 
-$synced = 0;
+if (!$serverCheck['ok']) {
+    fail_json('Cannot connect to the Render face recognition server.', [
+        'http_code' => $serverCheck['code'],
+        'curl_error' => $serverCheck['error'],
+        'response' => $serverCheck['raw']
+    ]);
+}
 
-$failed = 0;
+/* -------------------------------------------------------------
+ * Build a batch by both file count and total byte size.
+ * ------------------------------------------------------------- */
+$batch = [];
+$batchBytes = 0;
 
-$failedFiles = [];
+for ($i = $offset; $i < $totalFiles && count($batch) < $requestedLimit; $i++) {
+    $filePath = $faceFiles[$i];
+    $size = @filesize($filePath);
 
+    if ($size === false) {
+        fail_json('Unable to read file size.', [
+            'file' => basename($filePath)
+        ]);
+    }
 
-// ------------------------------------------------------------
-// IMPORTANT
-// ------------------------------------------------------------
-// The first successful upload uses:
-//
-//     replace=1
-//
-// This tells Render to delete its old face dataset first.
-//
-// After the first successful upload:
-//
-//     replace=0
-//
-// Therefore Render will contain only the current
-// InfinityFree face dataset.
-// ------------------------------------------------------------
+    /* If one file is unusually large, still allow it as a one-file batch. */
+    if (!empty($batch) && ($batchBytes + $size) > $MAX_BATCH_BYTES) {
+        break;
+    }
 
-$replaceDataset = true;
+    $batch[] = $filePath;
+    $batchBytes += $size;
+}
 
+if (empty($batch)) {
+    fail_json('Could not build a valid synchronization batch.');
+}
 
-// ------------------------------------------------------------
-// Upload one image per request
-// ------------------------------------------------------------
-// This avoids problems with PHP/cURL multipart handling
-// when sending many files using the same "files[]" field.
-// ------------------------------------------------------------
+/* -------------------------------------------------------------
+ * Send all files in this batch in ONE multipart request.
+ *
+ * Indexed field names are intentional: files[0], files[1], ... .
+ * The Render server accepts these indexed multipart keys.
+ * ------------------------------------------------------------- */
+$postFields = [];
 
-foreach ($faceFiles as $filePath) {
-
-    $filename =
-        basename($filePath);
-
+foreach ($batch as $index => $filePath) {
+    $filename = basename($filePath);
     $mimeType = 'image/jpeg';
 
-    if (
-        function_exists(
-            'mime_content_type'
-        )
-    ) {
-
-        $detected =
-            @mime_content_type(
-                $filePath
-            );
-
+    if (function_exists('mime_content_type')) {
+        $detected = @mime_content_type($filePath);
         if ($detected) {
             $mimeType = $detected;
         }
     }
 
-
-    // --------------------------------------------------------
-    // Create CURL file
-    // --------------------------------------------------------
-
-    $curlFile =
-        curl_file_create(
-            $filePath,
-            $mimeType,
-            $filename
-        );
-
-
-    // --------------------------------------------------------
-    // Upload fields
-    // --------------------------------------------------------
-
-    $uploadFields = [
-        'files[]' => $curlFile
-    ];
-
-
-    // --------------------------------------------------------
-    // FIRST SUCCESSFUL UPLOAD ONLY
-    // --------------------------------------------------------
-
-    if ($replaceDataset) {
-
-        $uploadFields['replace'] = '1';
-    }
-
-
-    // --------------------------------------------------------
-    // Send to Render
-    // --------------------------------------------------------
-
-    $ch = curl_init(
-        $FACE_SERVER .
-        '/sync_faces'
+    $postFields['files[' . $index . ']'] = curl_file_create(
+        $filePath,
+        $mimeType,
+        $filename
     );
-
-    curl_setopt_array($ch, [
-
-        CURLOPT_RETURNTRANSFER => true,
-
-        CURLOPT_POST => true,
-
-        CURLOPT_POSTFIELDS =>
-            $uploadFields,
-
-        CURLOPT_CONNECTTIMEOUT =>
-            15,
-
-        CURLOPT_TIMEOUT =>
-            45,
-
-        CURLOPT_FOLLOWLOCATION =>
-            true,
-
-        CURLOPT_HTTPHEADER => [
-            'Accept: application/json'
-        ],
-
-        CURLOPT_HTTP_VERSION =>
-            CURL_HTTP_VERSION_1_1,
-
-        CURLOPT_IPRESOLVE =>
-            CURL_IPRESOLVE_V4
-    ]);
-
-
-    $response =
-        curl_exec($ch);
-
-    $curlError =
-        curl_error($ch);
-
-    $httpCode =
-        curl_getinfo(
-            $ch,
-            CURLINFO_HTTP_CODE
-        );
-
-    curl_close($ch);
-
-
-    // --------------------------------------------------------
-    // Decode response
-    // --------------------------------------------------------
-
-    $json = null;
-
-    if ($response !== false) {
-
-        $json =
-            json_decode(
-                $response,
-                true
-            );
-    }
-
-
-    // --------------------------------------------------------
-    // SUCCESS
-    // --------------------------------------------------------
-
-    if (
-        $response !== false &&
-        $httpCode >= 200 &&
-        $httpCode < 300 &&
-        is_array($json) &&
-        !empty($json['success'])
-    ) {
-
-        $synced++;
-
-
-        // ----------------------------------------------------
-        // VERY IMPORTANT:
-        //
-        // Only the first successful upload replaces
-        // the old Render dataset.
-        // ----------------------------------------------------
-
-        $replaceDataset = false;
-
-    } else {
-
-        $failed++;
-
-        $failedFiles[] = [
-
-            'file' =>
-                $filename,
-
-            'http_code' =>
-                $httpCode,
-
-            'error' =>
-                $curlError ?:
-                (
-                    is_array($json) &&
-                    isset($json['error'])
-                        ? $json['error']
-                        : 'Unknown upload error'
-                )
-        ];
-    }
-
-
-    // --------------------------------------------------------
-    // Small delay to avoid hammering Render
-    // --------------------------------------------------------
-
-    usleep(100000);
 }
 
-
-// ============================================================
-// STEP 5: CHECK SYNCHRONIZATION
-// ============================================================
-
-if ($failed > 0) {
-
-    echo json_encode([
-
-        'success' => false,
-
-        'error' =>
-            'Some face images could not be synchronized to Render.',
-
-        'total_files' =>
-            $totalFiles,
-
-        'synced' =>
-            $synced,
-
-        'failed' =>
-            $failed,
-
-        'failed_files' =>
-            $failedFiles
-    ]);
-
-    exit;
+/* Replace the Render dataset only on the first batch. */
+if ($replaceDataset && $offset === 0) {
+    $postFields['replace'] = '1';
 }
 
+$ch = curl_init($FACE_SERVER . '/sync_faces');
 
-// ============================================================
-// STEP 6: START RENDER TRAINING
-// ============================================================
-//
-// /train is POST.
-//
-// Do NOT use GET here.
-//
+curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_POST => true,
+    CURLOPT_POSTFIELDS => $postFields,
+    CURLOPT_CONNECTTIMEOUT => 15,
+    CURLOPT_TIMEOUT => 50,
+    CURLOPT_FOLLOWLOCATION => true,
+    CURLOPT_HTTPHEADER => [
+        'Accept: application/json'
+    ],
+    CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+    CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4
+]);
 
-$trainResult =
-    render_post_json(
+$response = curl_exec($ch);
+$curlError = curl_error($ch);
+$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+
+$json = ($response !== false) ? json_decode($response, true) : null;
+
+if (
+    $response === false ||
+    $httpCode < 200 ||
+    $httpCode >= 300 ||
+    !is_array($json) ||
+    empty($json['success'])
+) {
+    fail_json('Render rejected the face-image batch.', [
+        'offset' => $offset,
+        'batch_files' => count($batch),
+        'batch_bytes' => $batchBytes,
+        'http_code' => $httpCode,
+        'curl_error' => $curlError,
+        'render_response' => $response,
+        'first_file' => basename($batch[0])
+    ]);
+}
+
+$batchSynced = intval($json['saved'] ?? count($batch));
+$nextOffset = $offset + count($batch);
+$done = ($nextOffset >= $totalFiles);
+
+/* -------------------------------------------------------------
+ * Final batch: start Render training and return immediately.
+ * ------------------------------------------------------------- */
+$trainStarted = false;
+$trainResponse = null;
+
+if ($done) {
+    $trainResult = render_post_json(
         $FACE_SERVER . '/train',
         [],
         30
     );
 
-
-if (
-    !$trainResult['ok']
-) {
-
-    echo json_encode([
-
-        'success' => false,
-
-        'error' =>
-            'Face images were synchronized, but Render could not start training.',
-
-        'total_files' =>
-            $totalFiles,
-
-        'synced' =>
-            $synced,
-
-        'failed' =>
-            $failed,
-
-        'http_code' =>
-            $trainResult['code'] ?? 0,
-
-        'curl_error' =>
-            $trainResult['error'] ?? '',
-
-        'render_response' =>
-            $trainResult['raw'] ?? ''
-    ]);
-
-    exit;
-}
-
-
-// ============================================================
-// STEP 7: ASYNC MODE
-// ============================================================
-//
-// Admin dashboard uses:
-//
-// face_train_multi.php?async=1
-//
-// After Render accepts the training request,
-// return immediately.
-//
-
-if (
-    isset($_GET['async'])
-) {
-
-    echo json_encode([
-
-        'success' => true,
-
-        'mode' => 'async',
-
-        'message' =>
-            'Face images synchronized and Render training started.',
-
-        'total_files' =>
-            $totalFiles,
-
-        'synced' =>
-            $synced,
-
-        'failed' =>
-            $failed
-    ]);
-
-    exit;
-}
-
-
-// ============================================================
-// STEP 8: SYNCHRONOUS MODE
-// ============================================================
-//
-// Used when this file is called without ?async=1.
-//
-// Wait for Render training to finish.
-//
-// Maximum:
-// 180 checks x 2 seconds
-// = approximately 6 minutes
-//
-
-$trainingResult = null;
-
-for (
-    $i = 0;
-    $i < 180;
-    $i++
-) {
-
-    sleep(2);
-
-
-    $statusResult =
-        render_get(
-            $FACE_SERVER .
-            '/train/status',
-            20
-        );
-
-
-    if (
-        !$statusResult['ok'] ||
-        !is_array(
-            $statusResult['data']
-        )
-    ) {
-        continue;
+    if (!$trainResult['ok']) {
+        fail_json('All face images were synchronized, but Render could not start training.', [
+            'total_files' => $totalFiles,
+            'synced_total' => $nextOffset,
+            'http_code' => $trainResult['code'],
+            'curl_error' => $trainResult['error'],
+            'render_response' => $trainResult['raw']
+        ]);
     }
 
+    $trainData = $trainResult['data'];
 
-    $status =
-        $statusResult['data'];
-
-    $state =
-        $status['state'] ??
-        'unknown';
-
-
-    if (
-        $state === 'done' ||
-        $state === 'error'
-    ) {
-
-        $trainingResult =
-            $status;
-
-        break;
+    if (is_array($trainData) && isset($trainData['success']) && !$trainData['success']) {
+        fail_json('Render refused to start training.', [
+            'total_files' => $totalFiles,
+            'synced_total' => $nextOffset,
+            'render_response' => $trainData
+        ]);
     }
+
+    $trainStarted = true;
+    $trainResponse = $trainData;
 }
-
-
-// ============================================================
-// TRAINING TIMEOUT
-// ============================================================
-
-if (
-    $trainingResult === null
-) {
-
-    echo json_encode([
-
-        'success' => false,
-
-        'error' =>
-            'Training timed out while waiting for Render.',
-
-        'total_files' =>
-            $totalFiles,
-
-        'synced' =>
-            $synced
-    ]);
-
-    exit;
-}
-
-
-// ============================================================
-// TRAINING ERROR
-// ============================================================
-
-if (
-    ($trainingResult['state'] ?? '') ===
-    'error'
-) {
-
-    echo json_encode([
-
-        'success' => false,
-
-        'error' =>
-            $trainingResult['message'] ??
-            'Render training failed.',
-
-        'total_files' =>
-            $totalFiles,
-
-        'synced' =>
-            $synced,
-
-        'training' =>
-            $trainingResult
-    ]);
-
-    exit;
-}
-
-
-// ============================================================
-// GET TRAINING RESULTS
-// ============================================================
-
-$result =
-    $trainingResult['result'] ??
-    [];
-
-
-// ============================================================
-// LBPH
-// ============================================================
-
-$lbph =
-    $result['lbph'] ??
-    [
-
-        'ok' => false,
-
-        'samples' => 0,
-
-        'students' => 0,
-
-        'error' =>
-            'No LBPH result returned.'
-    ];
-
-
-// ============================================================
-// FISHERFACES
-// ============================================================
-
-$fisherfaces =
-    $result['fisherfaces'] ??
-    [
-
-        'ok' => false,
-
-        'samples' => 0,
-
-        'students' => 0,
-
-        'error' =>
-            'No Fisherfaces result returned.'
-    ];
-
-
-// ============================================================
-// LABELS
-// ============================================================
-
-if (
-    !empty($lbph['ok'])
-) {
-
-    $lbphLabel =
-        'Trained on ' .
-        ($lbph['samples'] ?? 0) .
-        ' samples / ' .
-        ($lbph['students'] ?? 0) .
-        ' students';
-
-} else {
-
-    $lbphLabel =
-        'Error: ' .
-        ($lbph['error'] ?? 'unknown');
-}
-
-
-if (
-    !empty($fisherfaces['ok'])
-) {
-
-    $fisherLabel =
-        'Trained on ' .
-        ($fisherfaces['samples'] ?? 0) .
-        ' samples / ' .
-        ($fisherfaces['students'] ?? 0) .
-        ' students';
-
-} else {
-
-    $fisherLabel =
-        'Error: ' .
-        ($fisherfaces['error'] ?? 'unknown');
-}
-
-
-// ============================================================
-// FINAL RESPONSE
-// ============================================================
 
 echo json_encode([
-
     'success' => true,
-
-    'mode' => 'completed',
-
-    'message' =>
-        'Face images synchronized and models successfully retrained.',
-
-    'sync' => [
-
-        'total_files' =>
-            $totalFiles,
-
-        'synced' =>
-            $synced,
-
-        'failed' =>
-            $failed
-    ],
-
-    'lbph' =>
-        $lbph,
-
-    'fisherfaces' =>
-        $fisherfaces,
-
-
-    /*
-     * Compatibility with older dashboard code.
-     *
-     * Older code may still refer to "fr_helper".
-     * We map it to Fisherfaces.
-     */
-
-    'fr_helper' =>
-        $fisherfaces,
-
-
-    'labels' => [
-
-        'lbph' =>
-            $lbphLabel,
-
-        'fisherfaces' =>
-            $fisherLabel,
-
-        'fr_helper' =>
-            $fisherLabel
-    ]
-
+    'batch_mode' => true,
+    'offset' => $offset,
+    'next_offset' => $nextOffset,
+    'batch_files' => count($batch),
+    'batch_synced' => $batchSynced,
+    'batch_bytes' => $batchBytes,
+    'total_files' => $totalFiles,
+    'synced_total' => $nextOffset,
+    'done' => $done,
+    'train_started' => $trainStarted,
+    'train_response' => $trainResponse
 ]);
-
+exit;
 ?>

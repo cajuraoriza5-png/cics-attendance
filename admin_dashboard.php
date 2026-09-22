@@ -1076,6 +1076,7 @@ let _pollTimer = null;
 let _syncTimer = null;
 let _lastState = 'idle';
 let _trainingStarted = false;
+let _trainRequestSent = false;
 let _trainingStartTime = null;
 
 function setModelCard(id, cls, msg){
@@ -1347,9 +1348,15 @@ async function pollRenderStatus(){
             }
         }
 
+        if(!_trainRequestSent){
+            trainTitle.textContent = '🔄 Synchronizing face dataset…';
+            trainMsg.textContent = 'Uploading face images to Render…';
+            return;
+        }
+
         if(!_trainingStarted){
             const freshStatus =
-                statusTime > (_trainingStartTime - 5000);
+                statusTime > (_trainingStartTime - 120000);
 
             const runningState =
                 state === 'running' ||
@@ -1420,157 +1427,150 @@ function startRenderPolling(){
     );
 }
 
+async function syncFaceDatasetInBatches(){
+
+    const BATCH_LIMIT = 100;
+    let offset = 0;
+    let total = null;
+    let synced = 0;
+
+    while(true){
+
+        const replace = (offset === 0) ? 1 : 0;
+
+        trainTitle.textContent = '🔄 Synchronizing face dataset…';
+        trainMsg.textContent = total
+            ? `Uploading face images: ${synced} / ${total}`
+            : 'Reading enrolled face images…';
+
+        const url =
+            'face_train_multi.php?batch=1' +
+            '&offset=' + encodeURIComponent(offset) +
+            '&limit=' + encodeURIComponent(BATCH_LIMIT) +
+            '&replace=' + replace +
+            '&t=' + Date.now();
+
+        const response = await fetch(url, {
+            method: 'GET',
+            cache: 'no-store'
+        });
+
+        let data = null;
+        try{
+            data = await response.json();
+        }catch(e){
+            throw new Error('Invalid response from face synchronization service.');
+        }
+
+        if(!response.ok || !data || data.success === false){
+            let message =
+                (data && (data.error || data.message)) ||
+                ('Face synchronization failed (HTTP ' + response.status + ').');
+
+            if(data && data.failed_files && data.failed_files.length){
+                const first = data.failed_files[0];
+                message += ' First failed file: ' +
+                    (first.file || 'unknown') +
+                    (first.error ? ' — ' + first.error : '');
+            }
+
+            throw new Error(message);
+        }
+
+        total = Number(data.total_files || total || 0);
+        synced = Number(data.synced_total ?? (synced + Number(data.batch_synced || 0)));
+
+        if(total > 0){
+            const percent = Math.min(
+                70,
+                Math.max(5, Math.round(5 + (synced / total) * 65))
+            );
+
+            trainBarFill.style.width = percent + '%';
+            trainBarPct.textContent = percent + '%';
+        }
+
+        if(data.train_started){
+            _trainRequestSent = true;
+            trainMsg.textContent =
+                'All face images synchronized. Render training has started…';
+            return;
+        }
+
+        if(data.done){
+            trainMsg.textContent =
+                'All face images synchronized. Starting Render training…';
+            return;
+        }
+
+        const nextOffset = Number(data.next_offset);
+
+        if(!Number.isFinite(nextOffset) || nextOffset <= offset){
+            throw new Error('Face synchronization stopped because the next batch position was invalid.');
+        }
+
+        offset = nextOffset;
+    }
+}
+
 function startTraining(){
 
-    if(
-        _pollTimer ||
-        btnRetrain.disabled
-    ){
+    if(_pollTimer || btnRetrain.disabled){
         return;
     }
 
     _trainingStarted = false;
+    _trainRequestSent = false;
     _trainingStartTime = Date.now();
 
     trainPanel.classList.remove('hidden');
 
-    trainTitle.textContent =
-        '🔄 Preparing training…';
-
-    trainMsg.textContent =
-        'Synchronizing face images to Render…';
+    trainTitle.textContent = '🔄 Preparing training…';
+    trainMsg.textContent = 'Starting face dataset synchronization…';
 
     trainBarFill.style.width = '5%';
     trainBarPct.textContent = '5%';
     trainBarFill.className = 'train-bar-fill';
 
-    setModelCard(
-        'lbph',
-        '',
-        'Waiting…'
-    );
-
-    setModelCard(
-        'fisherfaces',
-        '',
-        'Waiting…'
-    );
+    setModelCard('lbph', '', 'Waiting…');
+    setModelCard('fisherfaces', '', 'Waiting…');
 
     btnRetrain.disabled = true;
     btnDismiss.classList.add('hidden');
 
-    /*
-     * Start polling IMMEDIATELY.
-     *
-     * face_train_multi.php can take several minutes because it
-     * synchronizes the face images before calling Render /train.
-     * The old code used "await" here, which froze the dashboard
-     * on "Connecting..." until PHP finally returned.
-     */
     startRenderPolling();
 
-    _syncTimer = setInterval(
-        setTrainingTimer,
-        1000
-    );
+    _syncTimer = setInterval(setTrainingTimer, 1000);
 
-    /*
-     * IMPORTANT:
-     * Do NOT await this request.
-     *
-     * Let PHP synchronize the dataset in the background while
-     * the dashboard continues polling Render.
-     */
-    fetch(
-        'face_train_multi.php?async=1&t=' +
-        Date.now(),
-        {
-            method: 'GET',
-            cache: 'no-store'
-        }
-    )
-    .then(async response => {
-
-        let result = null;
-
-        try{
-            result = await response.json();
-        }catch(e){
-            result = null;
-        }
-
-        if(!response.ok){
-            throw new Error(
-                'Training request failed (' +
-                response.status +
-                ')'
-            );
-        }
-
-        if(
-            result &&
-            result.success === false
-        ){
-            throw new Error(
-                result.message ||
-                'Face training could not be started.'
-            );
-        }
-
-        /*
-         * If Render polling has already detected the NEW training
-         * run, do not overwrite its live status.
-         */
-        if(_trainingStarted){
-            return;
-        }
-
-        /*
-         * PHP has returned successfully. Render should have received
-         * the /train request. Keep polling; do not display 100%.
-         */
-        trainMsg.textContent =
-            'Training request sent to Render. Waiting for live progress…';
-
-    })
-    .catch(error => {
-
-        /*
-         * Only show an error if Render has NOT already confirmed
-         * the new training run.
-         */
-        if(!_trainingStarted){
-
-            if(_syncTimer){
-                clearInterval(_syncTimer);
-                _syncTimer = null;
-            }
-
-            if(_pollTimer){
-                clearInterval(_pollTimer);
-                _pollTimer = null;
-            }
-
-            trainTitle.textContent =
-                '❌ Training Failed';
-
+    syncFaceDatasetInBatches()
+        .then(() => {
+            /*
+             * The final batch starts Render /train.
+             * Do not mark the run complete here. Render's fresh
+             * /train/status timestamp is the authoritative signal.
+             */
             trainMsg.textContent =
-                error.message ||
-                'Unable to start model training.';
+                'Face dataset synchronized. Waiting for Render training status…';
+        })
+        .catch(error => {
 
-            trainBarFill.className =
-                'train-bar-fill error';
+            if(_trainingStarted){
+                return;
+            }
 
+            stopAllTimers();
+
+            trainTitle.textContent = '❌ Training Failed';
+            trainMsg.textContent =
+                error.message || 'Face synchronization failed.';
+
+            trainBarFill.className = 'train-bar-fill error';
             trainBarFill.style.width = '100%';
             trainBarPct.textContent = 'Error';
 
             btnRetrain.disabled = false;
-
-            btnDismiss.classList.remove(
-                'hidden'
-            );
-        }
-    });
+            btnDismiss.classList.remove('hidden');
+        });
 }
 
 function dismissTraining(){
@@ -1589,6 +1589,7 @@ function dismissTraining(){
 
     _lastState = 'idle';
     _trainingStarted = false;
+    _trainRequestSent = false;
     _trainingStartTime = null;
 }
 
