@@ -484,7 +484,7 @@ color:#000;
 
 .train-models{
 display:grid;
-grid-template-columns:repeat(2,1fr);
+grid-template-columns:repeat(3,1fr);
 gap:12px;
 margin-bottom:16px;
 }
@@ -1069,588 +1069,199 @@ const trainElapsed = document.getElementById('trainElapsed');
 const btnRetrain   = document.getElementById('btnRetrain');
 const btnDismiss   = document.getElementById('btnDismiss');
 
-const RENDER_TRAIN_STATUS =
-    'https://cics-attendance.onrender.com/train/status';
-
+const FACE_SERVER = 'https://cics-attendance.onrender.com';
+const BATCH_LIMIT = 100;
 let _pollTimer = null;
-let _syncTimer = null;
-let _lastState = 'idle';
-let _trainingStarted = false;
-let _trainRequestSent = false;
-let _trainingStartTime = null;
+let _batchRunning = false;
+let _trainingStartTime = 0;
 
 function setModelCard(id, cls, msg){
     const card = document.getElementById('tm-' + id);
     const status = document.getElementById('tms-' + id);
-
     if(!card || !status) return;
-
     card.className = 'tm-card ' + cls;
     status.textContent = msg;
 }
 
-function setTrainingTimer(){
-    if(!_trainingStartTime) return;
-
-    const seconds = Math.floor(
-        (Date.now() - _trainingStartTime) / 1000
-    );
-
-    trainElapsed.textContent = '⏱ ' + seconds + 's';
+function setProgress(pct, msg){
+    pct = Math.max(0, Math.min(100, Math.round(pct)));
+    trainBarFill.style.width = pct + '%';
+    trainBarPct.textContent = pct + '%';
+    if(msg !== undefined) trainMsg.textContent = msg;
 }
 
-function stopAllTimers(){
-    if(_pollTimer){
-        clearInterval(_pollTimer);
-        _pollTimer = null;
-    }
+function applyRenderStatus(d){
+    if(!d || !d.state) return false;
 
-    if(_syncTimer){
-        clearInterval(_syncTimer);
-        _syncTimer = null;
-    }
-}
-
-function applyStatus(d){
-    if(!d || !d.state || d.state === 'idle'){
-        return;
-    }
-
-    /*
-     * Render has several states:
-     * running
-     * loading
-     * training_lbph
-     * training_fisherfaces
-     * completed
-     * done
-     * partial
-     * error
-     */
-    const state = String(d.state).toLowerCase();
-
-    const finished =
-        state === 'done' ||
-        state === 'completed' ||
-        state === 'partial' ||
-        state === 'error';
-
-    const running =
-        !finished;
+    const ts = d.timestamp ? Date.parse(String(d.timestamp)) : 0;
+    // Ignore an old result from a previous training run.
+    if(_trainingStartTime && ts && ts < (_trainingStartTime - 2000)) return false;
 
     trainPanel.classList.remove('hidden');
 
-    trainMsg.textContent =
-        d.message || 'Training in progress…';
-
-    let pct = parseInt(d.progress, 10);
-
-    if(Number.isNaN(pct)){
-        pct = 0;
-    }
-
-    /*
-     * Never allow an intermediate state to display 100%.
-     * 100% is reserved for the completed result.
-     */
-    if(running){
-        pct = Math.min(99, Math.max(0, pct));
-    }
-
-    if(finished && state !== 'error'){
-        pct = 100;
-    }
-
-    trainBarFill.style.width = pct + '%';
-    trainBarPct.textContent  = pct + '%';
-
-    if(d.elapsed !== undefined && d.elapsed !== null){
-        trainElapsed.textContent = '⏱ ' + d.elapsed + 's';
-    }else{
-        setTrainingTimer();
-    }
+    if(d.message) trainMsg.textContent = d.message;
+    if(Number.isFinite(Number(d.progress))) setProgress(Number(d.progress));
 
     trainBarFill.className = 'train-bar-fill';
+    if(d.state === 'done' || d.state === 'completed') trainBarFill.classList.add('done');
+    if(d.state === 'error') trainBarFill.classList.add('error');
 
-    if(finished && state !== 'error'){
-        trainBarFill.classList.add('done');
+    const r = d.result || {};
+
+    if(d.state === 'running' || d.state === 'loading' || d.state === 'training_lbph'){
+        setModelCard('lbph', 'active', 'Training…');
+    }
+    if(d.state === 'training_fisherfaces'){
+        setModelCard('lbph', r.lbph?.ok ? 'ok' : 'ok', r.lbph?.ok ? '✅ ' + r.lbph.samples + ' samples / ' + r.lbph.students + ' students' : 'Completed');
+        setModelCard('fisherfaces', 'active', 'Training…');
     }
 
-    if(state === 'error'){
-        trainBarFill.classList.add('error');
+    if(r.lbph){
+        setModelCard('lbph', r.lbph.ok ? 'ok' : 'fail', r.lbph.ok
+            ? '✅ ' + r.lbph.samples + ' samples / ' + r.lbph.students + ' students'
+            : '❌ ' + (r.lbph.error || 'failed').substring(0, 45));
+    }
+    if(r.fisherfaces){
+        setModelCard('fisherfaces', r.fisherfaces.ok ? 'ok' : 'fail', r.fisherfaces.ok
+            ? '✅ ' + r.fisherfaces.samples + ' samples / ' + r.fisherfaces.students + ' students'
+            : '❌ ' + (r.fisherfaces.error || 'failed').substring(0, 45));
     }
 
-    /*
-     * LBPH
-     */
-    if(
-        (state === 'training_lbph' || state === 'running') &&
-        !d.result?.lbph
-    ){
-        setModelCard(
-            'lbph',
-            'active',
-            'Training…'
-        );
+    if(d.state === 'running' || d.state === 'loading' || d.state === 'training_lbph' || d.state === 'training_fisherfaces'){
+        trainTitle.textContent = '🔄 Training in Progress…';
+        btnRetrain.disabled = true;
+        btnDismiss.classList.add('hidden');
+        return true;
     }
 
-    if(d.result?.lbph){
-        const l = d.result.lbph;
-
-        if(l.ok){
-            setModelCard(
-                'lbph',
-                'ok',
-                '✅ ' +
-                (l.samples ?? 0) +
-                ' samples / ' +
-                (l.students ?? 0) +
-                ' students'
-            );
-        }else{
-            setModelCard(
-                'lbph',
-                'fail',
-                '❌ ' +
-                String(l.error || 'Training failed')
-                    .substring(0, 50)
-            );
-        }
+    if(d.state === 'done' || d.state === 'completed'){
+        trainTitle.textContent = '✅ Training Complete';
+        setProgress(100, d.message || 'Training completed successfully!');
+        btnRetrain.disabled = false;
+        btnDismiss.classList.remove('hidden');
+        if(_pollTimer){ clearInterval(_pollTimer); _pollTimer = null; }
+        return true;
     }
 
-    /*
-     * Fisherfaces
-     */
-    if(
-        state === 'training_fisherfaces' &&
-        !d.result?.fisherfaces
-    ){
-        setModelCard(
-            'fisherfaces',
-            'active',
-            'Training…'
-        );
+    if(d.state === 'error'){
+        trainTitle.textContent = '❌ Training Failed';
+        btnRetrain.disabled = false;
+        btnDismiss.classList.remove('hidden');
+        if(_pollTimer){ clearInterval(_pollTimer); _pollTimer = null; }
+        return true;
     }
 
-    if(d.result?.fisherfaces){
-        const f = d.result.fisherfaces;
-
-        if(f.ok){
-            setModelCard(
-                'fisherfaces',
-                'ok',
-                '✅ ' +
-                (f.samples ?? 0) +
-                ' samples / ' +
-                (f.students ?? 0) +
-                ' students'
-            );
-        }else{
-            setModelCard(
-                'fisherfaces',
-                'fail',
-                '❌ ' +
-                String(f.error || 'Training failed')
-                    .substring(0, 50)
-            );
-        }
-    }
-
-    /*
-     * If training is loading data, show both models as waiting.
-     */
-    if(
-        state === 'loading' ||
-        state === 'starting'
-    ){
-        setModelCard(
-            'lbph',
-            'active',
-            'Loading data…'
-        );
-
-        setModelCard(
-            'fisherfaces',
-            '',
-            'Waiting…'
-        );
-    }
-
-    /*
-     * Titles
-     */
-    if(running){
-        trainTitle.textContent =
-            '🔄 Training in Progress…';
-    }else if(state === 'error'){
-        trainTitle.textContent =
-            '❌ Training Failed';
-    }else{
-        trainTitle.textContent =
-            '✅ Training Complete';
-    }
-
-    /*
-     * Buttons
-     */
-    btnRetrain.disabled = running;
-
-    btnDismiss.classList.toggle(
-        'hidden',
-        !finished
-    );
-
-    _lastState = state;
-
-    /*
-     * Stop polling only when Render reports a
-     * real final state.
-     */
-    if(finished){
-        stopAllTimers();
-    }
+    return false;
 }
 
 async function pollRenderStatus(){
     try{
-        const response = await fetch(
-            RENDER_TRAIN_STATUS +
-            '?t=' + Date.now(),
-            {
-                method: 'GET',
-                cache: 'no-store'
-            }
-        );
-
-        if(!response.ok){
-            throw new Error(
-                'HTTP ' + response.status
-            );
-        }
-
+        const response = await fetch(FACE_SERVER + '/train/status?t=' + Date.now(), {
+            cache: 'no-store'
+        });
+        if(!response.ok) return;
         const data = await response.json();
-        const state = String(data.state || '').toLowerCase();
-
-        /*
-         * The Render status file can contain the result from the
-         * PREVIOUS training run. Ignore that old result.
-         *
-         * When a new /train request starts, face_server.py writes
-         * a fresh timestamp. That fresh timestamp is our signal
-         * that the NEW training run has actually started.
-         */
-        let statusTime = 0;
-
-        if(data.timestamp){
-            const parsedTime = Date.parse(data.timestamp);
-            if(!Number.isNaN(parsedTime)){
-                statusTime = parsedTime;
-            }
-        }
-
-        if(!_trainRequestSent){
-            trainTitle.textContent = '🔄 Synchronizing face dataset…';
-            trainMsg.textContent = 'Uploading face images to Render…';
-            return;
-        }
-
-        if(!_trainingStarted){
-            const freshStatus =
-                statusTime > (_trainingStartTime - 120000);
-
-            const runningState =
-                state === 'running' ||
-                state === 'starting' ||
-                state === 'loading' ||
-                state === 'training_lbph' ||
-                state === 'training_fisherfaces';
-
-            if(freshStatus && (runningState || state === 'done' || state === 'completed' || state === 'partial' || state === 'error')){
-                _trainingStarted = true;
-
-                if(_syncTimer){
-                    clearInterval(_syncTimer);
-                    _syncTimer = null;
-                }
-
-                trainTitle.textContent =
-                    '🔄 Training in Progress…';
-
-                trainMsg.textContent =
-                    data.message ||
-                    'Render training has started.';
-
-                startRenderPolling();
-                applyStatus(data);
-                return;
-            }
-
-            /*
-             * No new Render training yet.
-             * Keep showing synchronization instead of an old 100%.
-             */
-            trainTitle.textContent =
-                '🔄 Preparing training…';
-
-            trainMsg.textContent =
-                'Synchronizing face images to Render…';
-
-            trainBarFill.style.width = '5%';
-            trainBarPct.textContent = '5%';
-
-            return;
-        }
-
-        applyStatus(data);
-
-    }catch(error){
-        if(!_trainingStarted){
-            trainMsg.textContent =
-                'Synchronizing face images to Render…';
-        }else{
-            trainMsg.textContent =
-                'Waiting for the Render face server…';
-        }
+        applyRenderStatus(data);
+    }catch(e){
+        // Keep polling. Render free services can take time to wake up.
     }
 }
 
 function startRenderPolling(){
-    if(_pollTimer){
-        clearInterval(_pollTimer);
-    }
-
+    if(_pollTimer) clearInterval(_pollTimer);
     pollRenderStatus();
-
-    _pollTimer = setInterval(
-        pollRenderStatus,
-        2000
-    );
+    _pollTimer = setInterval(pollRenderStatus, 2000);
 }
 
-async function syncFaceDatasetInBatches(){
+async function syncNextBatch(offset, totalExpected){
+    const url = 'face_train_multi.php?batch=1&offset=' + encodeURIComponent(offset) +
+                '&limit=' + BATCH_LIMIT +
+                (offset === 0 ? '&replace=1' : '') +
+                '&t=' + Date.now();
 
-    const BATCH_LIMIT = 100;
-    let offset = 0;
-    let total = null;
-    let synced = 0;
+    const response = await fetch(url, {cache:'no-store'});
+    const data = await response.json();
 
-    while(true){
-
-        const replace = (offset === 0) ? 1 : 0;
-
-        trainTitle.textContent = '🔄 Synchronizing face dataset…';
-        trainMsg.textContent = total
-            ? `Uploading face images: ${synced} / ${total}`
-            : 'Reading enrolled face images…';
-
-        const url =
-            'face_train_multi.php?batch=1' +
-            '&offset=' + encodeURIComponent(offset) +
-            '&limit=' + encodeURIComponent(BATCH_LIMIT) +
-            '&replace=' + replace +
-            '&t=' + Date.now();
-
-        const response = await fetch(url, {
-            method: 'GET',
-            cache: 'no-store'
-        });
-
-        let data = null;
-        try{
-            data = await response.json();
-        }catch(e){
-            throw new Error('Invalid response from face synchronization service.');
-        }
-
-        if(!response.ok || !data || data.success === false){
-            let message =
-                (data && (data.error || data.message)) ||
-                ('Face synchronization failed (HTTP ' + response.status + ').');
-
-            if(data && data.failed_files && data.failed_files.length){
-                const first = data.failed_files[0];
-                message += ' First failed file: ' +
-                    (first.file || 'unknown') +
-                    (first.error ? ' — ' + first.error : '');
-            }
-
-            throw new Error(message);
-        }
-
-        total = Number(data.total_files || total || 0);
-        synced = Number(data.synced_total ?? (synced + Number(data.batch_synced || 0)));
-
-        if(total > 0){
-            const percent = Math.min(
-                70,
-                Math.max(5, Math.round(5 + (synced / total) * 65))
-            );
-
-            trainBarFill.style.width = percent + '%';
-            trainBarPct.textContent = percent + '%';
-        }
-
-        if(data.train_started){
-            _trainRequestSent = true;
-            trainMsg.textContent =
-                'All face images synchronized. Render training has started…';
-            return;
-        }
-
-        if(data.done){
-            trainMsg.textContent =
-                'All face images synchronized. Starting Render training…';
-            return;
-        }
-
-        const nextOffset = Number(data.next_offset);
-
-        if(!Number.isFinite(nextOffset) || nextOffset <= offset){
-            throw new Error('Face synchronization stopped because the next batch position was invalid.');
-        }
-
-        offset = nextOffset;
+    if(!response.ok || !data.success){
+        throw new Error(data.error || 'Face synchronization failed.');
     }
+
+    const total = Number(data.total_files || totalExpected || 1);
+    const next = Number(data.next_offset || 0);
+    const pct = Math.min(45, Math.round((next / total) * 45));
+    setProgress(Math.max(5, pct), 'Synchronizing face images to Render… ' + next + ' / ' + total);
+
+    if(data.done){
+        setProgress(50, 'Face images synchronized. Render training is starting…');
+        return data;
+    }
+
+    return await syncNextBatch(next, total);
 }
 
 function startTraining(){
+    if(_batchRunning) return;
 
-    if(_pollTimer || btnRetrain.disabled){
-        return;
-    }
-
-    _trainingStarted = false;
-    _trainRequestSent = false;
+    _batchRunning = true;
     _trainingStartTime = Date.now();
 
     trainPanel.classList.remove('hidden');
-
     trainTitle.textContent = '🔄 Preparing training…';
-    trainMsg.textContent = 'Starting face dataset synchronization…';
-
-    trainBarFill.style.width = '5%';
-    trainBarPct.textContent = '5%';
+    trainMsg.textContent = 'Starting face-image synchronization…';
+    setProgress(2);
     trainBarFill.className = 'train-bar-fill';
-
     setModelCard('lbph', '', 'Waiting…');
     setModelCard('fisherfaces', '', 'Waiting…');
-
     btnRetrain.disabled = true;
     btnDismiss.classList.add('hidden');
 
+    // Start polling immediately, then synchronize the dataset in batches.
     startRenderPolling();
 
-    _syncTimer = setInterval(setTrainingTimer, 1000);
-
-    syncFaceDatasetInBatches()
+    syncNextBatch(0, 0)
         .then(() => {
-            /*
-             * The final batch starts Render /train.
-             * Do not mark the run complete here. Render's fresh
-             * /train/status timestamp is the authoritative signal.
-             */
-            trainMsg.textContent =
-                'Face dataset synchronized. Waiting for Render training status…';
+            trainTitle.textContent = '🔄 Training in Progress…';
+            setProgress(50, 'Render accepted the face dataset. Training models…');
+            // The final batch already calls /train on Render.
+            startRenderPolling();
         })
-        .catch(error => {
-
-            if(_trainingStarted){
-                return;
-            }
-
-            stopAllTimers();
-
+        .catch(err => {
+            _batchRunning = false;
+            if(_pollTimer){ clearInterval(_pollTimer); _pollTimer = null; }
             trainTitle.textContent = '❌ Training Failed';
-            trainMsg.textContent =
-                error.message || 'Face synchronization failed.';
-
+            trainMsg.textContent = err.message || 'Training could not be started.';
             trainBarFill.className = 'train-bar-fill error';
-            trainBarFill.style.width = '100%';
-            trainBarPct.textContent = 'Error';
-
             btnRetrain.disabled = false;
             btnDismiss.classList.remove('hidden');
+        })
+        .finally(() => {
+            _batchRunning = false;
         });
 }
 
 function dismissTraining(){
-
-    stopAllTimers();
-
-    /*
-     * Do not delete Render's real training status.
-     * The old implementation deleted the local
-     * InfinityFree status file, which was not the
-     * actual Render training status anyway.
-     */
+    if(_pollTimer){ clearInterval(_pollTimer); _pollTimer = null; }
     trainPanel.classList.add('hidden');
-
     btnRetrain.disabled = false;
-
-    _lastState = 'idle';
-    _trainingStarted = false;
-    _trainRequestSent = false;
-    _trainingStartTime = null;
+    _batchRunning = false;
 }
 
-/*
- * Page load:
- *
- * We intentionally DO NOT display the old "done"
- * status from a previous training run.
- *
- * We only check Render to see whether training is
- * CURRENTLY running.
- */
-async function checkTrainingOnPageLoad(){
-
+// Do not show stale training results automatically on page load.
+// Only monitor Render if its current status is genuinely running.
+async function checkExistingTraining(){
     try{
-
-        const response = await fetch(
-            RENDER_TRAIN_STATUS +
-            '?t=' + Date.now(),
-            {
-                method: 'GET',
-                cache: 'no-store'
-            }
-        );
-
-        if(!response.ok){
-            return;
-        }
-
+        const response = await fetch(FACE_SERVER + '/train/status?t=' + Date.now(), {cache:'no-store'});
+        if(!response.ok) return;
         const data = await response.json();
-        const state = String(
-            data.state || ''
-        ).toLowerCase();
-
-        const currentlyRunning =
-            state === 'running' ||
-            state === 'starting' ||
-            state === 'loading' ||
-            state === 'training_lbph' ||
-            state === 'training_fisherfaces';
-
-        if(currentlyRunning){
-
-            _trainingStarted = true;
-            _trainingStartTime = Date.now();
-
-            trainPanel.classList.remove(
-                'hidden'
-            );
-
-            btnRetrain.disabled = true;
-
+        if(['running','loading','training_lbph','training_fisherfaces'].includes(data.state)){
+            trainPanel.classList.remove('hidden');
+            applyRenderStatus(data);
             startRenderPolling();
         }
-
-    }catch(error){
-        // Silent on normal dashboard load.
-    }
+    }catch(e){}
 }
 
-checkTrainingOnPageLoad();
+checkExistingTraining();
 
 // Toggle Sidebar for Mobile
 function toggleSidebar(){
