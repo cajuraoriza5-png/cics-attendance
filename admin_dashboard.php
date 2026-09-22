@@ -484,7 +484,7 @@ color:#000;
 
 .train-models{
 display:grid;
-grid-template-columns:repeat(3,1fr);
+grid-template-columns:repeat(2,1fr);
 gap:12px;
 margin-bottom:16px;
 }
@@ -839,6 +839,757 @@ Welcome back,
 <div class="train-panel hidden" id="trainPanel">
     <div class="train-header">
         <span class="train-title" id="trainTitle">🔄 Model Training</span>
+        <span class="train-elapsed" id="trainElapsed"></span>
+    </div>
+    <div class="train-msg" id="trainMsg">Initializing…</div>
+    <div class="train-bar-wrap">
+        <div class="train-bar-fill" id="trainBarFill"></div>
+        <div class="train-bar-pct"  id="trainBarPct">0%</div>
+    </div>
+    <div class="train-models">
+        <div class="tm-card" id="tm-lbph">
+            <div class="tm-icon">🔷</div>
+            <div class="tm-name">LBPH</div>
+            <div class="tm-status" id="tms-lbph">Waiting…</div>
+        </div>
+        <div class="tm-card" id="tm-fisherfaces">
+            <div class="tm-icon">🧠</div>
+            <div class="tm-name">Fisherfaces</div>
+            <div class="tm-status" id="tms-fisherfaces">Waiting…</div>
+        </div>
+    </div>
+    <div class="train-actions">
+        <button class="btn-dismiss" id="btnDismiss" onclick="dismissTraining()">✕ Dismiss</button>
+    </div>
+</div>
+
+<!-- ANALYTICS -->
+
+<div class="analytics-grid">
+
+<div class="analytics-card">
+
+<h3>👨‍🎓 Total Students</h3>
+
+<div class="analytics-value">
+
+<?php echo $totalStudents; ?>
+
+</div>
+
+</div>
+
+<div class="analytics-card">
+
+<h3>📸 Face Registered</h3>
+
+<div class="analytics-value">
+
+<?php echo $registeredStudents; ?>
+
+</div>
+
+</div>
+
+<div class="analytics-card">
+
+<h3>⏳ Pending Registration</h3>
+
+<div class="analytics-value">
+
+<?php echo $pendingStudents; ?>
+
+</div>
+
+</div>
+
+<div class="analytics-card">
+
+<h3>✅ Present Today</h3>
+
+<div class="analytics-value">
+
+<?php echo $totalPresent; ?>
+
+</div>
+
+</div>
+
+<div class="analytics-card">
+
+<h3>⏰ Late Today</h3>
+
+<div class="analytics-value">
+
+<?php echo $totalLate; ?>
+
+</div>
+
+</div>
+
+<div class="analytics-card">
+
+<h3>❌ Absent Today</h3>
+
+<div class="analytics-value">
+
+<?php echo $totalAbsent; ?>
+
+</div>
+
+</div>
+
+<div class="analytics-card" onclick="window.location='payments.php'" style="cursor:pointer;">
+
+<h3>⏳ Pending Payments</h3>
+
+<div class="analytics-value" style="color:<?php echo $pendingPaymentsCount>0?'#ffa500':'#51cf66'; ?>">
+
+<?php echo $pendingPaymentsCount; ?>
+
+</div>
+
+</div>
+
+<div class="analytics-card" onclick="window.location='payments.php'" style="cursor:pointer;">
+
+<h3>💰 Outstanding Fines</h3>
+
+<div class="analytics-value" style="color:<?php echo $outstandingTotal>0?'#ff6b6b':'#51cf66'; ?>">
+
+₱<?php echo number_format($outstandingTotal,0); ?>
+
+</div>
+
+</div>
+
+</div>
+
+<!-- RECENT EVENTS -->
+
+<div class="content-grid">
+
+<div class="panel">
+
+<h2>
+
+📅 Recent Events
+
+</h2>
+
+<div class="table-scroll">
+
+<table class="data-table">
+
+<thead>
+
+<tr>
+
+<th>Event</th>
+<th>Type</th>
+<th>Venue</th>
+<th>Date</th>
+
+</tr>
+
+</thead>
+
+<tbody>
+
+<?php while($row =
+$recentEvents->fetch_assoc()){ ?>
+
+<tr>
+
+<td>
+
+<?php
+echo htmlspecialchars(
+$row['event_name']
+);
+?>
+
+</td>
+
+<td>
+
+<?php
+echo htmlspecialchars(
+$row['event_type']
+);
+?>
+
+</td>
+
+<td>
+
+<?php
+echo htmlspecialchars(
+$row['venue']
+);
+?>
+
+</td>
+
+<td>
+
+<?php
+echo date(
+'M d, Y',
+strtotime($row['event_date'])
+);
+?>
+
+</td>
+
+</tr>
+
+<?php } ?>
+
+</tbody>
+
+</table>
+
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+<script>
+// ── Training Progress Widget ───────────────────────────────────────────────
+const trainPanel   = document.getElementById('trainPanel');
+const trainTitle   = document.getElementById('trainTitle');
+const trainMsg     = document.getElementById('trainMsg');
+const trainBarFill = document.getElementById('trainBarFill');
+const trainBarPct  = document.getElementById('trainBarPct');
+const trainElapsed = document.getElementById('trainElapsed');
+const btnRetrain   = document.getElementById('btnRetrain');
+const btnDismiss   = document.getElementById('btnDismiss');
+
+const RENDER_TRAIN_STATUS =
+    'https://cics-attendance.onrender.com/train/status';
+
+let _pollTimer = null;
+let _syncTimer = null;
+let _lastState = 'idle';
+let _trainingStarted = false;
+let _trainingStartTime = null;
+
+function setModelCard(id, cls, msg){
+    const card = document.getElementById('tm-' + id);
+    const status = document.getElementById('tms-' + id);
+
+    if(!card || !status) return;
+
+    card.className = 'tm-card ' + cls;
+    status.textContent = msg;
+}
+
+function setTrainingTimer(){
+    if(!_trainingStartTime) return;
+
+    const seconds = Math.floor(
+        (Date.now() - _trainingStartTime) / 1000
+    );
+
+    trainElapsed.textContent = '⏱ ' + seconds + 's';
+}
+
+function stopAllTimers(){
+    if(_pollTimer){
+        clearInterval(_pollTimer);
+        _pollTimer = null;
+    }
+
+    if(_syncTimer){
+        clearInterval(_syncTimer);
+        _syncTimer = null;
+    }
+}
+
+function applyStatus(d){
+    if(!d || !d.state || d.state === 'idle'){
+        return;
+    }
+
+    /*
+     * Render has several states:
+     * running
+     * loading
+     * training_lbph
+     * training_fisherfaces
+     * completed
+     * done
+     * partial
+     * error
+     */
+    const state = String(d.state).toLowerCase();
+
+    const finished =
+        state === 'done' ||
+        state === 'completed' ||
+        state === 'partial' ||
+        state === 'error';
+
+    const running =
+        !finished;
+
+    trainPanel.classList.remove('hidden');
+
+    trainMsg.textContent =
+        d.message || 'Training in progress…';
+
+    let pct = parseInt(d.progress, 10);
+
+    if(Number.isNaN(pct)){
+        pct = 0;
+    }
+
+    /*
+     * Never allow an intermediate state to display 100%.
+     * 100% is reserved for the completed result.
+     */
+    if(running){
+        pct = Math.min(99, Math.max(0, pct));
+    }
+
+    if(finished && state !== 'error'){
+        pct = 100;
+    }
+
+    trainBarFill.style.width = pct + '%';
+    trainBarPct.textContent  = pct + '%';
+
+    if(d.elapsed !== undefined && d.elapsed !== null){
+        trainElapsed.textContent = '⏱ ' + d.elapsed + 's';
+    }else{
+        setTrainingTimer();
+    }
+
+    trainBarFill.className = 'train-bar-fill';
+
+    if(finished && state !== 'error'){
+        trainBarFill.classList.add('done');
+    }
+
+    if(state === 'error'){
+        trainBarFill.classList.add('error');
+    }
+
+    /*
+     * LBPH
+     */
+    if(
+        (state === 'training_lbph' || state === 'running') &&
+        !d.result?.lbph
+    ){
+        setModelCard(
+            'lbph',
+            'active',
+            'Training…'
+        );
+    }
+
+    if(d.result?.lbph){
+        const l = d.result.lbph;
+
+        if(l.ok){
+            setModelCard(
+                'lbph',
+                'ok',
+                '✅ ' +
+                (l.samples ?? 0) +
+                ' samples / ' +
+                (l.students ?? 0) +
+                ' students'
+            );
+        }else{
+            setModelCard(
+                'lbph',
+                'fail',
+                '❌ ' +
+                String(l.error || 'Training failed')
+                    .substring(0, 50)
+            );
+        }
+    }
+
+    /*
+     * Fisherfaces
+     */
+    if(
+        state === 'training_fisherfaces' &&
+        !d.result?.fisherfaces
+    ){
+        setModelCard(
+            'fisherfaces',
+            'active',
+            'Training…'
+        );
+    }
+
+    if(d.result?.fisherfaces){
+        const f = d.result.fisherfaces;
+
+        if(f.ok){
+            setModelCard(
+                'fisherfaces',
+                'ok',
+                '✅ ' +
+                (f.samples ?? 0) +
+                ' samples / ' +
+                (f.students ?? 0) +
+                ' students'
+            );
+        }else{
+            setModelCard(
+                'fisherfaces',
+                'fail',
+                '❌ ' +
+                String(f.error || 'Training failed')
+                    .substring(0, 50)
+            );
+        }
+    }
+
+    /*
+     * If training is loading data, show both models as waiting.
+     */
+    if(
+        state === 'loading' ||
+        state === 'starting'
+    ){
+        setModelCard(
+            'lbph',
+            'active',
+            'Loading data…'
+        );
+
+        setModelCard(
+            'fisherfaces',
+            '',
+            'Waiting…'
+        );
+    }
+
+    /*
+     * Titles
+     */
+    if(running){
+        trainTitle.textContent =
+            '🔄 Training in Progress…';
+    }else if(state === 'error'){
+        trainTitle.textContent =
+            '❌ Training Failed';
+    }else{
+        trainTitle.textContent =
+            '✅ Training Complete';
+    }
+
+    /*
+     * Buttons
+     */
+    btnRetrain.disabled = running;
+
+    btnDismiss.classList.toggle(
+        'hidden',
+        !finished
+    );
+
+    _lastState = state;
+
+    /*
+     * Stop polling only when Render reports a
+     * real final state.
+     */
+    if(finished){
+        stopAllTimers();
+    }
+}
+
+async function pollRenderStatus(){
+    try{
+        const response = await fetch(
+            RENDER_TRAIN_STATUS +
+            '?t=' + Date.now(),
+            {
+                method: 'GET',
+                cache: 'no-store'
+            }
+        );
+
+        if(!response.ok){
+            throw new Error(
+                'HTTP ' + response.status
+            );
+        }
+
+        const data = await response.json();
+
+        /*
+         * Only show the Render status after a new
+         * training request has actually been started.
+         * This prevents an old "done" status from
+         * appearing after a dashboard reload.
+         */
+        if(_trainingStarted){
+            applyStatus(data);
+        }
+    }catch(error){
+        if(_trainingStarted){
+            trainMsg.textContent =
+                'Waiting for the Render face server…';
+        }
+    }
+}
+
+function startRenderPolling(){
+    if(_pollTimer){
+        clearInterval(_pollTimer);
+    }
+
+    pollRenderStatus();
+
+    _pollTimer = setInterval(
+        pollRenderStatus,
+        2000
+    );
+}
+
+async function startTraining(){
+
+    if(
+        _pollTimer ||
+        btnRetrain.disabled
+    ){
+        return;
+    }
+
+    _trainingStarted = false;
+    _trainingStartTime = Date.now();
+
+    trainPanel.classList.remove('hidden');
+
+    trainTitle.textContent =
+        '🔄 Preparing training…';
+
+    trainMsg.textContent =
+        'Synchronizing face images to Render…';
+
+    trainBarFill.style.width = '5%';
+    trainBarPct.textContent = '5%';
+    trainBarFill.className = 'train-bar-fill';
+
+    setModelCard(
+        'lbph',
+        '',
+        'Waiting…'
+    );
+
+    setModelCard(
+        'fisherfaces',
+        '',
+        'Waiting…'
+    );
+
+    btnRetrain.disabled = true;
+    btnDismiss.classList.add('hidden');
+
+    /*
+     * Keep the timer moving while PHP is synchronizing
+     * the face images. The percentage stays at 5% because
+     * we do NOT have a real sync percentage.
+     */
+    _syncTimer = setInterval(
+        setTrainingTimer,
+        1000
+    );
+
+    try{
+
+        /*
+         * IMPORTANT:
+         * Do NOT await this request.
+         *
+         * The PHP script synchronizes the face dataset
+         * before it starts Render training. Waiting here
+         * was the reason the dashboard stayed on
+         * "Connecting to face server…".
+         */
+        const response = await fetch(
+            'face_train_multi.php?async=1&t=' +
+            Date.now(),
+            {
+                method: 'GET',
+                cache: 'no-store'
+            }
+        );
+
+        let result = null;
+
+        try{
+            result = await response.json();
+        }catch(e){
+            result = null;
+        }
+
+        if(!response.ok){
+            throw new Error(
+                'Training request failed (' +
+                response.status +
+                ')'
+            );
+        }
+
+        if(
+            result &&
+            result.success === false
+        ){
+            throw new Error(
+                result.message ||
+                'Face training could not be started.'
+            );
+        }
+
+        /*
+         * PHP has now synchronized the dataset and
+         * requested /train on Render.
+         */
+        _trainingStarted = true;
+
+        if(_syncTimer){
+            clearInterval(_syncTimer);
+            _syncTimer = null;
+        }
+
+        trainTitle.textContent =
+            '🔄 Training in Progress…';
+
+        trainMsg.textContent =
+            'Render training has started. Reading live progress…';
+
+        trainBarFill.style.width = '8%';
+        trainBarPct.textContent = '8%';
+
+        startRenderPolling();
+
+    }catch(error){
+
+        if(_syncTimer){
+            clearInterval(_syncTimer);
+            _syncTimer = null;
+        }
+
+        trainTitle.textContent =
+            '❌ Training Failed';
+
+        trainMsg.textContent =
+            error.message ||
+            'Unable to start model training.';
+
+        trainBarFill.className =
+            'train-bar-fill error';
+
+        trainBarFill.style.width = '100%';
+        trainBarPct.textContent = 'Error';
+
+        btnRetrain.disabled = false;
+
+        btnDismiss.classList.remove(
+            'hidden'
+        );
+    }
+}
+
+function dismissTraining(){
+
+    stopAllTimers();
+
+    /*
+     * Do not delete Render's real training status.
+     * The old implementation deleted the local
+     * InfinityFree status file, which was not the
+     * actual Render training status anyway.
+     */
+    trainPanel.classList.add('hidden');
+
+    btnRetrain.disabled = false;
+
+    _lastState = 'idle';
+    _trainingStarted = false;
+    _trainingStartTime = null;
+}
+
+/*
+ * Page load:
+ *
+ * We intentionally DO NOT display the old "done"
+ * status from a previous training run.
+ *
+ * We only check Render to see whether training is
+ * CURRENTLY running.
+ */
+async function checkTrainingOnPageLoad(){
+
+    try{
+
+        const response = await fetch(
+            RENDER_TRAIN_STATUS +
+            '?t=' + Date.now(),
+            {
+                method: 'GET',
+                cache: 'no-store'
+            }
+        );
+
+        if(!response.ok){
+            return;
+        }
+
+        const data = await response.json();
+        const state = String(
+            data.state || ''
+        ).toLowerCase();
+
+        const currentlyRunning =
+            state === 'running' ||
+            state === 'starting' ||
+            state === 'loading' ||
+            state === 'training_lbph' ||
+            state === 'training_fisherfaces';
+
+        if(currentlyRunning){
+
+            _trainingStarted = true;
+            _trainingStartTime = Date.now();
+
+            trainPanel.classList.remove(
+                'hidden'
+            );
+
+            btnRetrain.disabled = true;
+
+            startRenderPolling();
+        }
+
+    }catch(error){
+        // Silent on normal dashboard load.
+    }
+}
+
+checkTrainingOnPageLoad();
+
+// Toggle Sidebar for Mobile
+function toggleSidebar(){
+    document.querySelector('.sidebar').classList.toggle('collapsed');
+}
+</script>
+
+</body>
+</html>ss="train-title" id="trainTitle">🔄 Model Training</span>
         <span class="train-elapsed" id="trainElapsed"></span>
     </div>
     <div class="train-msg" id="trainMsg">Initializing…</div>
