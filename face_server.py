@@ -868,6 +868,40 @@ def sync_faces():
 
     try:
 
+        # If replace=1 is supplied, remove the existing Render face dataset
+        # before saving the newly synchronized images. This prevents old/deleted
+        # student face images from remaining on Render.
+        replace_dataset = (
+            str(request.form.get("replace", "0")).lower()
+            in ("1", "true", "yes")
+        )
+
+        removed_old = 0
+
+        if replace_dataset:
+            for old_file in os.listdir(FACES_DIR):
+                if not old_file.lower().endswith(".jpg"):
+                    continue
+
+                old_path = os.path.join(FACES_DIR, old_file)
+
+                if os.path.isfile(old_path):
+                    try:
+                        os.remove(old_path)
+                        removed_old += 1
+                    except Exception as e:
+                        print(
+                            f"[face_server] Could not remove old face "
+                            f"{old_file}: {e}",
+                            flush=True
+                        )
+
+            print(
+                f"[face_server] Replaced Render face dataset. "
+                f"Removed {removed_old} old JPG files.",
+                flush=True
+            )
+
         uploaded_files = request.files.getlist(
             "files"
         )
@@ -941,6 +975,8 @@ def sync_faces():
             "success": True,
             "saved": len(saved),
             "skipped": len(skipped),
+            "removed_old": removed_old,
+            "replaced_dataset": replace_dataset,
             "files": saved
         })
 
