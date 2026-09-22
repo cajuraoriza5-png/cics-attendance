@@ -435,16 +435,16 @@ async function pollServerReady(){
         return;
     }
 
-    const lbph   = d.models?.lbph      === true;
-    const fr     = d.models?.fr_helper === true;
-    const loading= d.models?.loading    !== false;
+    const lbph        = d.models?.lbph === true;
+    const fisherfaces = d.models?.fisherfaces === true;
+    const loading     = d.models?.loading !== false;
 
     if(loading && !lbph){
         scanOverlay.textContent = '⚙️ Step 2/4: Loading Haar Cascade & LBPH model…';
-    } else if(loading && lbph && !fr){
-        scanOverlay.textContent = '⚙️ Step 4/4: Loading face_recognition helper (optional)…';
-    } else if(!loading && lbph){
-        // ✅ LBPH ready - allow scanning (face_recognition is optional)
+    } else if(loading && lbph && !fisherfaces){
+        scanOverlay.textContent = '⚙️ Step 3/4: Loading Fisherfaces model…';
+    } else if(!loading && lbph && fisherfaces){
+        // ✅ Both current Render models are ready.
         clearInterval(_serverPollTmr);
         _serverPollTmr = null;
         _serverReady   = true;
@@ -452,11 +452,21 @@ async function pollServerReady(){
         await startCamera();
         beginScanning(); // auto-start if camera already loaded
         return;
-    } else if(!loading && !lbph){
-        // Server loaded but LBPH failed - show error
+    } else if(!loading && (!lbph || !fisherfaces)){
+        // Server loaded but one or both required models failed.
         clearInterval(_serverPollTmr);
         _serverPollTmr = null;
-        scanOverlay.textContent = '⚠️ LBPH model failed to load. Please train models first.';
+
+        if(!lbph && !fisherfaces){
+            scanOverlay.textContent =
+                '⚠️ LBPH and Fisherfaces failed to load. Please train models first.';
+        } else if(!lbph){
+            scanOverlay.textContent =
+                '⚠️ LBPH model failed to load. Please train models first.';
+        } else {
+            scanOverlay.textContent =
+                '⚠️ Fisherfaces model failed to load. Please train models first.';
+        }
         return;
     }
 }
