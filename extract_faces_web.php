@@ -35,7 +35,7 @@ if (isset($_POST['extract'])) {
     echo "<span class='success'>✓ face_data table found</span>\n\n";
     
     // Get all face data records
-    $result = $conn->query("SELECT id, user_id, face_image FROM face_data ORDER BY user_id, id");
+    $result = $conn->query("SELECT id, student_id, face_image FROM face_data ORDER BY student_id, id");
     
     if (!$result) {
         echo "<span class='error'>ERROR: Failed to query face_data table: " . $conn->error . "</span>\n";
@@ -65,7 +65,7 @@ if (isset($_POST['extract'])) {
     $errors = 0;
     
     while ($row = $result->fetch_assoc()) {
-        $userId = $row['user_id'];
+        $userId = $row['student_id'];
         $faceImageData = $row['face_image'];
         
         // Initialize counter for this user if not exists
