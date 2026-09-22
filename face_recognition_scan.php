@@ -693,7 +693,7 @@ async function doScan(){
     let consensusId = null, consensusName = null;
 
     const lbph = data.lbph;
-    if(lbph && !lbph.error && lbph.matched && lbph.id > 0 && lbph.confidence >= 75){
+    if(lbph && !lbph.error && lbph.matched && lbph.id > 0 && lbph.confidence >= 65){
         consensusId   = lbph.id;
         consensusName = lbph.name || ('ID:' + lbph.id);
     }
@@ -715,11 +715,11 @@ async function doScan(){
             if (cnnConf > 0) algoInfo += ` | CNN: ${cnnConf.toFixed(1)}%`;
         }
         
-        scanOverlay.textContent = `❓ Face detected – ${algoInfo} (need ≥75%)`;
+        scanOverlay.textContent = `❓ Face detected – ${algoInfo} (need ≥65%)`;
         resultBox.className='result-inline fail';
         resultName.textContent = 'Not recognized';
         resultStatus.textContent = (c != null && !lbph?.error)
-            ? `${algoInfo} – need ≥75% for match`
+            ? `${algoInfo} – need ≥65% for match`
             : (lbph?.error || 'No match found');
         scanInFlight = false;
         return;
