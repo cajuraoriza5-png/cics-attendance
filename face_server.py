@@ -97,6 +97,76 @@ _models_ready = {
 
 _train_thread = None
 
+# Training timing/progress state
+_training_started_at = None
+_training_lock = threading.Lock()
+
+
+def _training_elapsed():
+    """Return elapsed training time in seconds for the current training run."""
+    with _training_lock:
+        started = _training_started_at
+
+    if started is None:
+        return 0.0
+
+    return round(
+        max(0.0, time.time() - started),
+        1
+    )
+
+
+def _write_training_progress(
+    message,
+    progress,
+    result=None
+):
+    """Write a running training status update."""
+    _write_training_status(
+        "running",
+        message,
+        progress,
+        result
+    )
+
+
+def _progress_heartbeat(stop_event):
+    """
+    Keep the UI progress moving while train_all_models.py is running.
+
+    The percentage here is workflow progress, not an exact internal
+    percentage from OpenCV. It will never reach 100% until the actual
+    training subprocess finishes successfully.
+    """
+
+    progress = 20
+
+    while not stop_event.wait(2.0):
+
+        elapsed = _training_elapsed()
+
+        if progress < 90:
+
+            if elapsed < 20:
+                step = 1
+
+            elif elapsed < 60:
+                step = 2
+
+            else:
+                step = 1
+
+            progress = min(
+                90,
+                progress + step
+            )
+
+        _write_training_progress(
+            f"Training models... {progress}% "
+            f"(elapsed {elapsed:.1f}s)",
+            progress
+        )
+
 
 # =============================================================================
 # OPENCV CHECK
@@ -1015,11 +1085,20 @@ def _write_training_status(
     status = {
         "state": state,
         "message": message,
-        "progress": progress,
+        "progress": int(progress),
+        "elapsed_seconds": _training_elapsed(),
         "timestamp": str(
             np.datetime64("now")
         )
     }
+
+    with _training_lock:
+
+        if _training_started_at is not None:
+
+            status["started_at_epoch"] = (
+                _training_started_at
+            )
 
     if result is not None:
 
@@ -1052,8 +1131,15 @@ def _do_train():
     global _lbph
     global _fisherfaces
     global _models_ready
+    global _training_started_at
+
+    heartbeat_stop = threading.Event()
+    heartbeat_thread = None
 
     try:
+
+        with _training_lock:
+            _training_started_at = time.time()
 
         print(
             "[face_server] =================================",
@@ -1080,12 +1166,30 @@ def _do_train():
         # Count training images
         # ---------------------------------------------------------------------
 
+        _write_training_progress(
+            "Checking synchronized face images...",
+            10
+        )
 
         image_files = [
             f
             for f in os.listdir(FACES_DIR)
-            if re.match(r"^\d+_\d+\.jpg$", f, re.IGNORECASE)
+            if re.match(
+                r"^\d+_\d+\.jpg$",
+                f,
+                re.IGNORECASE
+            )
         ]
+
+        image_files.sort(
+            key=lambda name: [
+                int(part) if part.isdigit() else part.lower()
+                for part in re.split(
+                    r"(\d+)",
+                    name
+                )
+            ]
+        )
 
         if not image_files:
 
@@ -1102,9 +1206,21 @@ def _do_train():
 
             return
 
+        student_count = len({
+            f.split("_")[0]
+            for f in image_files
+        })
+
         print(
-            f"[face_server] Found {len(image_files)} face images.",
+            f"[face_server] Found {len(image_files)} face images "
+            f"for {student_count} students.",
             flush=True
+        )
+
+        _write_training_progress(
+            f"Found {len(image_files)} face images / "
+            f"{student_count} students.",
+            15
         )
 
         # ---------------------------------------------------------------------
@@ -1115,6 +1231,28 @@ def _do_train():
             PROJECT,
             "train_all_models.py"
         )
+
+        if not os.path.exists(train_script):
+
+            raise FileNotFoundError(
+                f"Training script not found: {train_script}"
+            )
+
+        _write_training_progress(
+            "Starting LBPH and Fisherfaces training...",
+            20
+        )
+
+        # The actual training script can take several minutes.
+        # This heartbeat updates the status file every two seconds so the
+        # dashboard has changing progress and elapsed time while training.
+        heartbeat_thread = threading.Thread(
+            target=_progress_heartbeat,
+            args=(heartbeat_stop,),
+            daemon=True
+        )
+
+        heartbeat_thread.start()
 
         process = subprocess.run(
             [
@@ -1127,10 +1265,22 @@ def _do_train():
             text=True
         )
 
-        print(
-            process.stdout,
-            flush=True
-        )
+        heartbeat_stop.set()
+
+        if heartbeat_thread is not None:
+
+            heartbeat_thread.join(
+                timeout=2
+            )
+
+            heartbeat_thread = None
+
+        if process.stdout:
+
+            print(
+                process.stdout,
+                flush=True
+            )
 
         if process.stderr:
 
@@ -1139,16 +1289,56 @@ def _do_train():
                 flush=True
             )
 
+        if process.returncode != 0:
+
+            error_text = (
+                process.stderr.strip()
+                if (
+                    process.stderr
+                    and process.stderr.strip()
+                )
+                else (
+                    process.stdout.strip()
+                    if (
+                        process.stdout
+                        and process.stdout.strip()
+                    )
+                    else (
+                        "Training script exited with "
+                        f"code {process.returncode}."
+                    )
+                )
+            )
+
+            _write_training_status(
+                "error",
+                error_text,
+                0
+            )
+
+            print(
+                f"[face_server] TRAINING SCRIPT FAILED: "
+                f"{error_text}",
+                flush=True
+            )
+
+            return
+
         # ---------------------------------------------------------------------
         # Check generated models
         # ---------------------------------------------------------------------
 
-        lbph_ok = (
-            os.path.exists(TRAINER)
+        _write_training_progress(
+            "Training finished. Checking generated models...",
+            92
         )
 
-        fisher_ok = (
-            os.path.exists(FISHERFACES)
+        lbph_ok = os.path.exists(
+            TRAINER
+        )
+
+        fisher_ok = os.path.exists(
+            FISHERFACES
         )
 
         # ---------------------------------------------------------------------
@@ -1173,6 +1363,7 @@ def _do_train():
                 )
 
                 with _lock:
+
                     _lbph = recognizer
 
                 _models_ready["lbph"] = True
@@ -1191,6 +1382,11 @@ def _do_train():
                     flush=True
                 )
 
+        _write_training_progress(
+            "LBPH model checked. Checking Fisherfaces...",
+            95
+        )
+
         # ---------------------------------------------------------------------
         # Reload Fisherfaces
         # ---------------------------------------------------------------------
@@ -1208,6 +1404,7 @@ def _do_train():
                 )
 
                 with _lock:
+
                     _fisherfaces = recognizer
 
                 _models_ready["fisherfaces"] = True
@@ -1234,28 +1431,21 @@ def _do_train():
             "lbph": {
                 "ok": lbph_ok,
                 "samples": len(image_files),
-                "students": len(
-                    set(
-                        f.split("_")[0]
-                        for f in image_files
-                    )
-                ) if image_files else 0
+                "students": student_count
             },
+
             "fisherfaces": {
                 "ok": fisher_ok,
                 "samples": len(image_files),
-                "students": len(
-                    set(
-                        f.split("_")[0]
-                        for f in image_files
-                    )
-                ) if image_files else 0
+                "students": student_count
             }
         }
 
         # ---------------------------------------------------------------------
         # Final status
         # ---------------------------------------------------------------------
+
+        elapsed = _training_elapsed()
 
         if lbph_ok and fisher_ok:
 
@@ -1267,7 +1457,8 @@ def _do_train():
             )
 
             print(
-                "[face_server] TRAINING COMPLETED [OK]",
+                f"[face_server] TRAINING COMPLETED [OK] "
+                f"in {elapsed:.1f}s",
                 flush=True
             )
 
@@ -1281,7 +1472,8 @@ def _do_train():
             )
 
             print(
-                "[face_server] LBPH completed.",
+                f"[face_server] LBPH completed "
+                f"in {elapsed:.1f}s.",
                 flush=True
             )
 
@@ -1314,6 +1506,24 @@ def _do_train():
             0
         )
 
+    finally:
+
+        heartbeat_stop.set()
+
+        if heartbeat_thread is not None:
+
+            heartbeat_thread.join(
+                timeout=2
+            )
+
+        # Do not clear the timer until after the final status has been
+        # written. This lets /train/status return the final elapsed time.
+        #
+        # The next training request will create a new timer.
+        with _training_lock:
+
+            _training_started_at = None
+
 
 @app.route(
     "/train",
@@ -1322,6 +1532,7 @@ def _do_train():
 def train():
 
     global _train_thread
+    global _training_started_at
 
     if (
         _train_thread
@@ -1330,8 +1541,20 @@ def train():
 
         return jsonify({
             "success": False,
-            "message": "Training already in progress"
-        })
+            "message": "Training already in progress",
+            "state": "running",
+            "elapsed_seconds": _training_elapsed()
+        }), 409
+
+    with _training_lock:
+
+        _training_started_at = time.time()
+
+    _write_training_status(
+        "running",
+        "Training request accepted. Starting worker...",
+        1
+    )
 
     _train_thread = threading.Thread(
         target=_do_train,
@@ -1342,7 +1565,10 @@ def train():
 
     return jsonify({
         "success": True,
-        "message": "Training started"
+        "message": "Training started",
+        "state": "running",
+        "progress": 1,
+        "elapsed_seconds": _training_elapsed()
     })
 
 
@@ -1361,7 +1587,9 @@ def train_status():
 
             return jsonify({
                 "state": "unknown",
-                "message": "No training has been started."
+                "message": "No training has been started.",
+                "progress": 0,
+                "elapsed_seconds": 0.0
             })
 
         with open(
@@ -1370,7 +1598,17 @@ def train_status():
             encoding="utf-8"
         ) as f:
 
-            status = json.load(f)
+            status = json.load(
+                f
+            )
+
+        # During active training, calculate elapsed time from the live
+        # in-memory timer instead of relying only on the last JSON write.
+        if status.get("state") == "running":
+
+            status["elapsed_seconds"] = (
+                _training_elapsed()
+            )
 
         return jsonify(
             status
@@ -1380,7 +1618,9 @@ def train_status():
 
         return jsonify({
             "state": "error",
-            "message": str(e)
+            "message": str(e),
+            "progress": 0,
+            "elapsed_seconds": 0.0
         })
 
 
