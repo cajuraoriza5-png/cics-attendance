@@ -807,12 +807,16 @@ def recognize():
 
     if len(detections) == 0:
 
-        result["lbph"] = {
+        no_face = {
             "id": -1,
             "confidence": 0.0,
             "matched": False,
             "message": "No face detected"
         }
+
+        result["lbph"] = no_face.copy()
+        result["fisherfaces"] = no_face.copy()
+        result["hybrid"] = no_face.copy()
 
         return jsonify(result)
 

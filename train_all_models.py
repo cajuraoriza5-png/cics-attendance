@@ -32,7 +32,7 @@ STATUS_F = os.path.join(FACES_DIR, ".train_status.json")
 # UPDATE TRAINING STATUS
 # =============================================================================
 
-def update_status(state, message, progress=0):
+def update_status(state, message, progress=0, result=None):
     """Update training status file."""
 
     status = {
@@ -41,6 +41,9 @@ def update_status(state, message, progress=0):
         "progress": progress,
         "timestamp": str(np.datetime64("now"))
     }
+
+    if result is not None:
+        status["result"] = result
 
     try:
         os.makedirs(FACES_DIR, exist_ok=True)
@@ -454,12 +457,28 @@ def main():
     # Final status
     # -------------------------------------------------------------------------
 
+    result = {
+        "lbph": {
+            "ok": lbph_success,
+            "samples": len(faces),
+            "students": len(np.unique(labels)),
+            "error": None if lbph_success else "LBPH training failed"
+        },
+        "fisherfaces": {
+            "ok": fisher_success,
+            "samples": len(faces),
+            "students": len(np.unique(labels)),
+            "error": None if fisher_success else "Fisherfaces training failed"
+        }
+    }
+
     if lbph_success and fisher_success:
 
         update_status(
-            "completed",
-            "Training completed successfully!",
-            100
+            "done",
+            "LBPH and Fisherfaces training completed.",
+            100,
+            result
         )
 
         print(
@@ -473,12 +492,12 @@ def main():
         )
 
         print(
-            "[train] LBPH: SUCCESS",
+            f"[train] LBPH: {len(faces)} samples / {len(np.unique(labels))} students",
             flush=True
         )
 
         print(
-            "[train] Fisherfaces: SUCCESS",
+            f"[train] Fisherfaces: {len(faces)} samples / {len(np.unique(labels))} students",
             flush=True
         )
 
@@ -490,9 +509,10 @@ def main():
     elif lbph_success:
 
         update_status(
-            "partial",
+            "done",
             "LBPH trained, Fisherfaces failed.",
-            100
+            100,
+            result
         )
 
         print(
@@ -508,9 +528,10 @@ def main():
     elif fisher_success:
 
         update_status(
-            "partial",
+            "done",
             "Fisherfaces trained, LBPH failed.",
-            100
+            100,
+            result
         )
 
         print(
@@ -528,7 +549,8 @@ def main():
         update_status(
             "error",
             "Both LBPH and Fisherfaces training failed.",
-            0
+            0,
+            result
         )
 
         print(
