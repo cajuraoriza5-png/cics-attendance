@@ -138,7 +138,7 @@ if (!is_array($result)) {
 }
 
 // ------------------------------------------------------------
-// Enrich recognized LBPH result with student information
+// Enrich recognition results with student information
 // ------------------------------------------------------------
 // IMPORTANT:
 // Use db.php instead of localhost/root/attendance.
@@ -149,51 +149,46 @@ require __DIR__ . '/db.php';
 
 if (isset($conn) && !$conn->connect_error) {
 
-    if (
-        isset($result['lbph']['id']) &&
-        is_numeric($result['lbph']['id']) &&
-        intval($result['lbph']['id']) > 0
-    ) {
+    $algorithms = ['lbph', 'fisherfaces', 'hybrid'];
 
-        $id = intval($result['lbph']['id']);
+    foreach ($algorithms as $algo) {
+        if (
+            isset($result[$algo]['id']) &&
+            is_numeric($result[$algo]['id']) &&
+            intval($result[$algo]['id']) > 0
+        ) {
+            $id = intval($result[$algo]['id']);
 
-        $stmt = $conn->prepare(
-            "SELECT first_name, last_name, student_id
-             FROM users
-             WHERE id = ?
-             LIMIT 1"
-        );
+            $stmt = $conn->prepare(
+                "SELECT first_name, last_name, student_id
+                 FROM users
+                 WHERE id = ?
+                 LIMIT 1"
+            );
 
-        if ($stmt) {
+            if ($stmt) {
+                $stmt->bind_param('i', $id);
+                $stmt->execute();
+                $queryResult = $stmt->get_result();
+                $row = $queryResult ? $queryResult->fetch_assoc() : null;
+                $stmt->close();
 
-            $stmt->bind_param('i', $id);
-            $stmt->execute();
-
-            $queryResult = $stmt->get_result();
-            $row = $queryResult ? $queryResult->fetch_assoc() : null;
-
-            $stmt->close();
-
-            if ($row) {
-                $result['lbph']['name'] =
-                    trim(($row['first_name'] ?? '') . ' ' . ($row['last_name'] ?? ''));
-
-                $result['lbph']['student_id'] =
-                    $row['student_id'] ?? '';
+                if ($row) {
+                    $result[$algo]['name'] =
+                        trim(($row['first_name'] ?? '') . ' ' . ($row['last_name'] ?? ''));
+                    $result[$algo]['student_id'] = $row['student_id'] ?? '';
+                } else {
+                    $result[$algo]['name'] = 'Unknown';
+                    $result[$algo]['student_id'] = '';
+                }
             } else {
-                $result['lbph']['name'] = 'Unknown';
-                $result['lbph']['student_id'] = '';
+                $result[$algo]['name'] = 'Unknown';
+                $result[$algo]['student_id'] = '';
             }
-
-        } else {
-            $result['lbph']['name'] = 'Unknown';
-            $result['lbph']['student_id'] = '';
+        } elseif (isset($result[$algo])) {
+            $result[$algo]['name'] = 'Unknown';
+            $result[$algo]['student_id'] = '';
         }
-
-    } elseif (isset($result['lbph'])) {
-
-        $result['lbph']['name'] = 'Unknown';
-        $result['lbph']['student_id'] = '';
     }
 
     $conn->close();

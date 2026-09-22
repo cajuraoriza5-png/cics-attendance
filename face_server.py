@@ -401,29 +401,20 @@ def _fisherfaces_confidence(distance):
 # FACE PREDICTION
 # =============================================================================
 
-def _combined_predict(face_roi):
-
+def _lbph_predict(face_roi):
+    """Run LBPH prediction only."""
     global _lbph
-    global _fisherfaces
-
-    lbph_result = None
-    fisher_result = None
-
-    # -------------------------------------------------------------------------
-    # Lazy load LBPH
-    # -------------------------------------------------------------------------
 
     with _lock:
         lbph_model = _lbph
 
+    # Lazy load LBPH
     if (
         lbph_model is None
         and os.path.exists(TRAINER)
         and _opencv_face_available()
     ):
-
         try:
-
             recognizer = (
                 cv2.face.LBPHFaceRecognizer_create(
                     radius=1,
@@ -432,34 +423,56 @@ def _combined_predict(face_roi):
                     grid_y=8
                 )
             )
-
             recognizer.read(TRAINER)
-
             with _lock:
                 _lbph = recognizer
                 lbph_model = recognizer
-
             _models_ready["lbph"] = True
-
             print(
                 "[face_server] LBPH lazy-loaded [OK]",
                 flush=True
             )
-
         except Exception as e:
-
             print(
                 f"[face_server] LBPH lazy-load failed: {e}",
                 flush=True
             )
 
-    # -------------------------------------------------------------------------
-    # Lazy load Fisherfaces
-    # -------------------------------------------------------------------------
+    if lbph_model is not None:
+        try:
+            student_id, distance = lbph_model.predict(face_roi)
+            confidence = _lbph_confidence(distance)
+            return {
+                "id": int(student_id),
+                "confidence": confidence,
+                "distance": float(distance),
+                "matched": bool(confidence >= 75.0),
+                "algorithm": "lbph"
+            }
+        except Exception as e:
+            print(
+                f"[face_server] LBPH prediction error: {e}",
+                flush=True
+            )
+
+    return {
+        "id": -1,
+        "confidence": 0.0,
+        "matched": False,
+        "distance": 999,
+        "algorithm": "lbph",
+        "error": "LBPH not available"
+    }
+
+
+def _fisherfaces_predict(face_roi):
+    """Run Fisherfaces prediction only."""
+    global _fisherfaces
 
     with _lock:
         fisher_model = _fisherfaces
 
+    # Lazy load Fisherfaces
     if (
         fisher_model is None
         and os.path.exists(FISHERFACES)
@@ -469,195 +482,104 @@ def _combined_predict(face_roi):
             "FisherFaceRecognizer_create"
         )
     ):
-
         try:
-
             recognizer = (
                 cv2.face.FisherFaceRecognizer_create()
             )
-
             recognizer.read(FISHERFACES)
-
             with _lock:
                 _fisherfaces = recognizer
                 fisher_model = recognizer
-
             _models_ready["fisherfaces"] = True
-
             print(
                 "[face_server] Fisherfaces lazy-loaded [OK]",
                 flush=True
             )
-
         except Exception as e:
-
             print(
                 f"[face_server] Fisherfaces lazy-load failed: {e}",
                 flush=True
             )
 
-    # -------------------------------------------------------------------------
-    # LBPH prediction
-    # -------------------------------------------------------------------------
-
-    if lbph_model is not None:
-
-        try:
-
-            student_id, distance = (
-                lbph_model.predict(face_roi)
-            )
-
-            confidence = _lbph_confidence(
-                distance
-            )
-
-            lbph_result = {
-                "id": int(student_id),
-                "confidence": confidence,
-                "distance": float(distance),
-                "matched": bool(
-                    confidence >= 75.0
-                )
-            }
-
-        except Exception as e:
-
-            print(
-                f"[face_server] LBPH prediction error: {e}",
-                flush=True
-            )
-
-    # -------------------------------------------------------------------------
-    # Fisherfaces prediction
-    # -------------------------------------------------------------------------
-
     if fisher_model is not None:
-
         try:
-
-            student_id, distance = (
-                fisher_model.predict(face_roi)
-            )
-
-            confidence = _fisherfaces_confidence(
-                distance
-            )
-
-            fisher_result = {
+            student_id, distance = fisher_model.predict(face_roi)
+            confidence = _fisherfaces_confidence(distance)
+            return {
                 "id": int(student_id),
                 "confidence": confidence,
                 "distance": float(distance),
-                "matched": bool(
-                    confidence >= 75.0
-                )
+                "matched": bool(confidence >= 75.0),
+                "algorithm": "fisherfaces"
             }
-
         except Exception as e:
-
             print(
                 f"[face_server] Fisherfaces prediction error: {e}",
                 flush=True
             )
-
-    # -------------------------------------------------------------------------
-    # Combine
-    # -------------------------------------------------------------------------
-
-    if (
-        fisher_result is not None
-        and fisher_result["matched"]
-    ):
-
-        result = fisher_result.copy()
-
-        result["algorithm"] = "fisherfaces"
-
-        result["lbph_confidence"] = (
-            lbph_result["confidence"]
-            if lbph_result
-            else 0
-        )
-
-        result["fisherfaces_confidence"] = (
-            fisher_result["confidence"]
-        )
-
-        if (
-            lbph_result
-            and lbph_result["matched"]
-            and lbph_result["id"]
-            == fisher_result["id"]
-        ):
-
-            result["confidence"] = min(
-                99.9,
-                fisher_result["confidence"] + 10.0
-            )
-
-            result["boosted"] = True
-
-        else:
-
-            result["boosted"] = False
-
-        return result
-
-    # -------------------------------------------------------------------------
-
-    if lbph_result is not None:
-
-        result = lbph_result.copy()
-
-        result["algorithm"] = "lbph"
-
-        result["lbph_confidence"] = (
-            lbph_result["confidence"]
-        )
-
-        result["fisherfaces_confidence"] = (
-            fisher_result["confidence"]
-            if fisher_result
-            else 0
-        )
-
-        if (
-            fisher_result
-            and fisher_result["matched"]
-            and lbph_result["id"]
-            != fisher_result["id"]
-        ):
-
-            result["confidence"] = max(
-                0.0,
-                result["confidence"] - 20.0
-            )
-
-            result["matched"] = (
-                result["confidence"] >= 50.0
-            )
-
-            result["disagreement"] = True
-
-        else:
-
-            result["disagreement"] = False
-
-        result["boosted"] = False
-
-        return result
-
-    # -------------------------------------------------------------------------
 
     return {
         "id": -1,
         "confidence": 0.0,
         "matched": False,
         "distance": 999,
-        "algorithm": "none",
-        "lbph_confidence": 0,
-        "fisherfaces_confidence": 0
+        "algorithm": "fisherfaces",
+        "error": "Fisherfaces not available"
     }
+
+
+def _combined_predict(face_roi):
+    """Run hybrid LBPH + Fisherfaces prediction."""
+    global _lbph
+    global _fisherfaces
+
+    lbph_result = _lbph_predict(face_roi)
+    fisher_result = _fisherfaces_predict(face_roi)
+
+    # Hybrid fusion rule
+    if (
+        fisher_result["matched"]
+        and lbph_result["matched"]
+        and lbph_result["id"] == fisher_result["id"]
+    ):
+        # Both agree - boost confidence
+        result = fisher_result.copy()
+        result["confidence"] = min(99.9, fisher_result["confidence"] + 10.0)
+        result["algorithm"] = "hybrid"
+        result["lbph_confidence"] = lbph_result["confidence"]
+        result["fisherfaces_confidence"] = fisher_result["confidence"]
+        result["boosted"] = True
+        return result
+    elif fisher_result["matched"]:
+        # Fisherfaces matched, use it
+        result = fisher_result.copy()
+        result["algorithm"] = "hybrid"
+        result["lbph_confidence"] = lbph_result["confidence"]
+        result["fisherfaces_confidence"] = fisher_result["confidence"]
+        result["boosted"] = False
+        if lbph_result["matched"] and lbph_result["id"] != fisher_result["id"]:
+            result["disagreement"] = True
+        return result
+    elif lbph_result["matched"]:
+        # Only LBPH matched, use it
+        result = lbph_result.copy()
+        result["algorithm"] = "hybrid"
+        result["lbph_confidence"] = lbph_result["confidence"]
+        result["fisherfaces_confidence"] = fisher_result["confidence"]
+        result["boosted"] = False
+        return result
+    else:
+        # Neither matched
+        return {
+            "id": -1,
+            "confidence": 0.0,
+            "matched": False,
+            "distance": 999,
+            "algorithm": "hybrid",
+            "lbph_confidence": lbph_result["confidence"],
+            "fisherfaces_confidence": fisher_result["confidence"],
+            "error": "No match"
+        }
 
 
 # =============================================================================
@@ -796,6 +718,12 @@ def recognize():
         "bbox": None,
         "lbph": {
             "error": "not run"
+        },
+        "fisherfaces": {
+            "error": "not run"
+        },
+        "hybrid": {
+            "error": "not run"
         }
     }
 
@@ -915,14 +843,17 @@ def recognize():
     )
 
     # -------------------------------------------------------------------------
-    # Recognition
+    # Recognition - Return separate LBPH, Fisherfaces, and Hybrid results
     # -------------------------------------------------------------------------
 
-    prediction = _combined_predict(
-        face_roi
-    )
+    # Get individual predictions
+    lbph_result = _lbph_predict(face_roi)
+    fisher_result = _fisherfaces_predict(face_roi)
+    hybrid_result = _combined_predict(face_roi)
 
-    result["lbph"] = prediction
+    result["lbph"] = lbph_result
+    result["fisherfaces"] = fisher_result
+    result["hybrid"] = hybrid_result
 
     return jsonify(result)
 
