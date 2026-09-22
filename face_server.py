@@ -1079,11 +1079,13 @@ def _do_train():
         # Count training images
         # ---------------------------------------------------------------------
 
+       import re
+
         image_files = [
-            f
-            for f in os.listdir(FACES_DIR)
-            if f.lower().endswith(".jpg")
-        ]
+             f
+             for f in os.listdir(FACES_DIR)
+             if re.match(r"^\d+_\d+\.jpg$", f, re.IGNORECASE)
+    ]   
 
         if not image_files:
 
