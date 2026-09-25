@@ -1,1 +1,6 @@
-{"state": "done", "step": "done", "progress": 100, "message": "Done. LBPH: 284 crops, FR encodings: 284", "elapsed": 350.7, "updated": "2026-09-09T10:40:17", "result": {"lbph": {"ok": true, "samples": 284, "students": 12, "error": null}, "fr_helper": {"ok": true, "encodings": 284, "error": null}, "success": true}}
+{
+  "state": "error",
+  "message": "No training data found.",
+  "progress": 0,
+  "timestamp": "2026-09-25T05:32:40"
+}

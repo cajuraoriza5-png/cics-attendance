@@ -10,7 +10,7 @@
  *   1. PHP renders the scanner UI (camera + stats + event info).
  *   2. JavaScript captures webcam frames and sends them as Base64 to
  *      face_server.py (Flask API on port 5001) via fetch().
- *   3. Flask runs LBPH recognition and returns the matched student ID.
+ *   3. Flask runs LBPH + Fisherfaces and returns separate LBPH, Fisherfaces, and Hybrid results.
  *   4. JS posts the result to scan_attendance.php to record attendance.
  *
  * AJAX ENDPOINTS (called by JavaScript on the same page):
@@ -74,7 +74,7 @@ if(isset($_GET['server_status'])){
     curl_close($ch);
     if($code===200 && $r) echo $r;
     else echo json_encode(['ok'=>false,'loading'=>true,'offline'=>true,
-                           'models'=>['lbph'=>false,'fr_helper'=>false]]);
+                           'models'=>['lbph'=>false,'fisherfaces'=>false,'loading'=>true]]);
     exit;
 }
 
@@ -672,7 +672,7 @@ async function doScan(){
 
     let data;
     try {
-        const res = await fetch('face_recognize_api.php', {method:'POST', body:fd});
+        const res = await fetch('face_recognize_api_updated.php', {method:'POST', body:fd});
         data = await res.json();
     } catch(e){
         scanOverlay.textContent = '⚠️ API error';
@@ -699,38 +699,62 @@ async function doScan(){
         return;
     }
 
-    // ── Recognition: single LBPH result (face_recognition boosts internally) ───
+    // ── Recognition: LBPH + Fisherfaces + Hybrid ─────────────────────────────
+    // The Python server returns three separate results: lbph, fisherfaces, hybrid.
+    // Hybrid is the final attendance decision.
+
     let consensusId = null, consensusName = null;
 
-    const lbph = data.lbph;
-    if(lbph && !lbph.error && lbph.matched && lbph.id > 0 && lbph.confidence >= 65){
-        consensusId   = lbph.id;
-        consensusName = lbph.name || ('ID:' + lbph.id);
+    const lbph        = data.lbph || null;
+    const fisherfaces = data.fisherfaces || null;
+    const hybrid      = data.hybrid || null;
+
+    const FRONTEND_THRESHOLD = 65;
+
+    if(
+        hybrid &&
+        !hybrid.error &&
+        hybrid.matched === true &&
+        Number(hybrid.id) > 0 &&
+        Number(hybrid.confidence || 0) >= FRONTEND_THRESHOLD
+    ){
+        consensusId   = Number(hybrid.id);
+        consensusName = hybrid.name || ('ID:' + hybrid.id);
+    }
+
+    const lbphConf = Number(lbph?.confidence || 0);
+    const fisherConf = Number(fisherfaces?.confidence || 0);
+    const hybridConf = Number(hybrid?.confidence || 0);
+
+    const lbphMatched = lbph?.matched === true;
+    const fisherMatched = fisherfaces?.matched === true;
+    const hybridMatched = hybrid?.matched === true;
+
+    let algoInfo =
+        `LBPH: ${lbphConf.toFixed(1)}%` +
+        ` | Fisherfaces: ${fisherConf.toFixed(1)}%` +
+        ` | Hybrid: ${hybridConf.toFixed(1)}%`;
+
+    if(lbphMatched && fisherMatched){
+        if(Number(lbph?.id) === Number(fisherfaces?.id)){
+            algoInfo += ' | Both agree';
+        } else {
+            algoInfo += ' | Disagreement';
+        }
+    } else if(lbphMatched){
+        algoInfo += ' | LBPH matched';
+    } else if(fisherMatched){
+        algoInfo += ' | Fisherfaces matched';
     }
 
     if(!consensusId){
-        const c = lbph?.confidence;
-        
-        // Build algorithm summary even for low confidence
-        let algoInfo = '';
-        const algo = lbph?.algorithm || 'lbph';
-        const lbphConf = lbph?.lbph_confidence || 0;
-        const cnnConf = lbph?.cnn_confidence || 0;
-        
-        if (algo === 'dlib_cnn') {
-            algoInfo = `CNN: ${cnnConf.toFixed(1)}%`;
-            if (lbphConf > 0) algoInfo += ` | LBPH: ${lbphConf.toFixed(1)}%`;
-        } else {
-            algoInfo = `LBPH: ${lbphConf.toFixed(1)}%`;
-            if (cnnConf > 0) algoInfo += ` | CNN: ${cnnConf.toFixed(1)}%`;
-        }
-        
-        scanOverlay.textContent = `❓ Face detected – ${algoInfo} (need ≥65%)`;
+        scanOverlay.textContent =
+            `❓ Face detected – ${algoInfo} (need Hybrid ≥${FRONTEND_THRESHOLD}%)`;
         resultBox.className='result-inline fail';
         resultName.textContent = 'Not recognized';
-        resultStatus.textContent = (c != null && !lbph?.error)
-            ? `${algoInfo} – need ≥65% for match`
-            : (lbph?.error || 'No match found');
+        resultStatus.textContent = hybrid?.error
+            ? hybrid.error
+            : `${algoInfo} – Hybrid result did not meet the ${FRONTEND_THRESHOLD}% threshold`;
         scanInFlight = false;
         return;
     }
@@ -760,34 +784,23 @@ async function doScan(){
     scanOverlay.textContent = `✅ Recognized: ${consensusName} – recording…`;
     const att = await recordAttendance(consensusId);
 
-    const conf = (lbph && !lbph.error) ? Math.round(lbph.confidence || 0) : 0;
-    const quality = conf >= 90 ? 'Excellent' : conf >= 75 ? 'Good' : conf >= 60 ? 'Fair' : 'Low';
-    
-    // Build algorithm summary showing hybrid system details
-    let algoSummary = '';
-    const algo = lbph?.algorithm || 'lbph';
-    const lbphConf = lbph?.lbph_confidence || 0;
-    const cnnConf = lbph?.cnn_confidence || 0;
-    
-    if (algo === 'dlib_cnn') {
-        // dlib CNN was used (more accurate)
-        algoSummary = `CNN: ${cnnConf.toFixed(1)}%`;
-        if (lbph?.boosted) {
-            algoSummary += ` (Boosted by LBPH: ${lbphConf.toFixed(1)}%)`;
-        } else if (lbphConf > 0) {
-            algoSummary += ` | LBPH: ${lbphConf.toFixed(1)}%`;
+    const conf = Math.round(hybridConf);
+    const quality =
+        conf >= 90 ? 'Excellent' :
+        conf >= 75 ? 'Good' :
+        conf >= 60 ? 'Fair' : 'Low';
+
+    let algoSummary =
+        `LBPH: ${lbphConf.toFixed(1)}%` +
+        ` | Fisherfaces: ${fisherConf.toFixed(1)}%` +
+        ` | Hybrid: ${hybridConf.toFixed(1)}% (${quality})`;
+
+    if(lbphMatched && fisherMatched){
+        if(Number(lbph?.id) === Number(fisherfaces?.id)){
+            algoSummary += ' | Agreement';
+        } else {
+            algoSummary += ' | Disagreement';
         }
-    } else if (algo === 'lbph') {
-        // LBPH was used
-        algoSummary = `LBPH: ${lbphConf.toFixed(1)}% (${quality})`;
-        if (cnnConf > 0) {
-            algoSummary += ` | CNN: ${cnnConf.toFixed(1)}%`;
-            if (lbph?.disagreement) {
-                algoSummary += ' [Disagreement]';
-            }
-        }
-    } else {
-        algoSummary = `Confidence: ${conf}% (${quality})`;
     }
 
     if(att.success){

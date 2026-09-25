@@ -86,7 +86,7 @@ Expected result:
 - `total_records` should equal `unique_filenames`
 - `unique_students` should be ≥ 2 (for Fisherfaces)
 
-### Step 4: Train Models (Sync to Render and Train)
+### Step 4: Train Models (Local Development)
 
 **Option A: Via Admin Dashboard**
 1. Go to Admin Dashboard
