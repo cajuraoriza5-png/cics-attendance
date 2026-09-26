@@ -50,3 +50,7 @@ Thumbs.db
 *.tmp
 *.temp
 New Text Document.txt
+fisherfaces.yml
+temp_model.yml
+faces_old_backup/
+*.yml.tmp
