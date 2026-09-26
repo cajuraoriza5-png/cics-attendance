@@ -589,20 +589,47 @@ function saveImage(index){
         ctx.translate(tmp.width, 0); ctx.scale(-1, 1);
         ctx.drawImage(video, 0, 0);
 
-        tmp.toBlob(blob => {
-            if(!blob){ reject(new Error('Blob creation failed')); return; }
-            const fd = new FormData();
-            fd.append('image', blob);
-            fd.append('uid',   '<?php echo $uid; ?>');
-            fd.append('index', index);
-            fetch('save_face.php', {method:'POST', body:fd})
-                .then(r => r.text())
-                .then(t => { if(t.trim()==='success') resolve(); else reject(new Error(t)); })
-                .catch(reject);
-        }, 'image/jpeg', 0.95);
-    });
-}
+  tmp.toBlob(blob => {
+    if(!blob){
+        reject(new Error('Blob creation failed'));
+        return;
+    }
 
+    console.log(
+        'CAPTURED IMAGE:',
+        'width=', tmp.width,
+        'height=', tmp.height,
+        'size=', blob.size,
+        'bytes'
+    );
+
+    console.log(
+        'KB:',
+        (blob.size / 1024).toFixed(2)
+    );
+
+    const fd = new FormData();
+    fd.append('image', blob, `face_${index}.jpg`);
+    fd.append('uid', '<?php echo $uid; ?>');
+    fd.append('index', index);
+
+    fetch('save_face.php', {
+        method:'POST',
+        body:fd
+    })
+    .then(r => r.text())
+    .then(t => {
+        console.log('save_face.php response:', t);
+
+        if(t.trim()==='success'){
+            resolve();
+        }else{
+            reject(new Error(t));
+        }
+    })
+    .catch(reject);
+
+}, 'image/jpeg', 0.95);
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
 async function waitForFace(maxMs=6000){
