@@ -588,59 +588,99 @@ function saveImage(index){
         // Mirror for natural selfie storage
         ctx.translate(tmp.width, 0); ctx.scale(-1, 1);
         ctx.drawImage(video, 0, 0);
+// ── Save a captured image to server ──────────────────────────────────────
+function saveImage(index){
+    return new Promise((resolve, reject) => {
 
-  tmp.toBlob(blob => {
-    if(!blob){
-        reject(new Error('Blob creation failed'));
-        return;
-    }
+        const tmp = document.createElement('canvas');
 
-    console.log(
-        'CAPTURED IMAGE:',
-        'width=', tmp.width,
-        'height=', tmp.height,
-        'size=', blob.size,
-        'bytes'
-    );
+        // Use the REAL camera resolution.
+        const width  = video.videoWidth || 640;
+        const height = video.videoHeight || 480;
 
-    console.log(
-        'KB:',
-        (blob.size / 1024).toFixed(2)
-    );
+        tmp.width  = width;
+        tmp.height = height;
 
-    const fd = new FormData();
-    fd.append('image', blob, `face_${index}.jpg`);
-    fd.append('uid', '<?php echo $uid; ?>');
-    fd.append('index', index);
+        const ctx = tmp.getContext('2d');
 
-    fetch('save_face.php', {
-        method:'POST',
-        body:fd
-    })
-    .then(r => r.text())
-    .then(t => {
-        console.log('save_face.php response:', t);
+        // Mirror for natural selfie storage
+        ctx.translate(width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, 0, 0, width, height);
 
-        if(t.trim()==='success'){
-            resolve();
-        }else{
-            reject(new Error(t));
-        }
-    })
-    .catch(reject);
+        // JPEG quality = 0.95
+        tmp.toBlob(blob => {
 
-}, 'image/jpeg', 0.95);
-function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+            if(!blob){
+                reject(new Error('Blob creation failed'));
+                return;
+            }
 
-async function waitForFace(maxMs=6000){
-    const t0 = Date.now();
-    while(!faceReady){
-        if(Date.now()-t0 > maxMs) return false;
-        await sleep(120);
-    }
-    return true;
+            console.log(
+                'CAPTURED IMAGE:',
+                'width=', width,
+                'height=', height,
+                'size=', blob.size,
+                'bytes'
+            );
+
+            console.log(
+                'KB:',
+                (blob.size / 1024).toFixed(2)
+            );
+
+            // Reject suspiciously small images
+            if(blob.size < 10000){
+                reject(new Error(
+                    'Captured image is too small: ' +
+                    (blob.size / 1024).toFixed(2) + ' KB'
+                ));
+                return;
+            }
+
+            const fd = new FormData();
+
+            fd.append(
+                'image',
+                blob,
+                `${index}.jpg`
+            );
+
+            fd.append(
+                'uid',
+                '<?php echo $uid; ?>'
+            );
+
+            fd.append(
+                'index',
+                index
+            );
+
+            fetch('save_face.php', {
+                method: 'POST',
+                body: fd
+            })
+            .then(r => r.text())
+            .then(t => {
+
+                console.log(
+                    'save_face.php response:',
+                    t
+                );
+
+                if(t.trim() === 'success'){
+                    resolve();
+                }else{
+                    reject(new Error(t));
+                }
+
+            })
+            .catch(reject);
+
+        }, 'image/jpeg', 0.95);
+
+    }); // IMPORTANT: closes new Promise()
 }
-
 // ── Progress helpers ──────────────────────────────────────────────────────
 function setProgress(cur, tot){
     const pct = Math.round((cur/tot)*100);

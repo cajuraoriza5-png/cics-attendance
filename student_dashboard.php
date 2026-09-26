@@ -817,7 +817,7 @@ padding:12px;
 
 <div class="profile-avatar">
     <?php if($face_image): ?>
-      <img src="faces/<?php echo htmlspecialchars($face_image); ?>">
+      <img src="faces/<?php echo htmlspecialchars($face_image); ?>?v=<?php echo time(); ?>">
     <?php else: ?>👤<?php endif; ?>
   </div>
 
@@ -1188,7 +1188,7 @@ document.getElementById('profileModal').addEventListener('click', function(e){
         </div>
         <div class="modal-profile-img">
             <?php if($face_image): ?>
-              <img src="faces/<?php echo htmlspecialchars($face_image); ?>">
+              <img src="faces/<?php echo htmlspecialchars($face_image); ?>?v=<?php echo time(); ?>">
             <?php else: ?>👤<?php endif; ?>
         </div>
         <div class="modal-info-row">
