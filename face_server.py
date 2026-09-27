@@ -784,7 +784,14 @@ def sync_faces():
             request.form.get("replace", "0")
         ).lower() in ("1", "true", "yes")
 
-        incoming = INCOMING_DIR if replace else FACES_DIR
+        # Continue a replacement upload in the staging directory across all
+        # batches. The PHP uploader sends replace=1 only on the first batch.
+        staging_active = any(
+            os.path.isfile(os.path.join(INCOMING_DIR, name))
+            for name in os.listdir(INCOMING_DIR)
+        )
+        use_staging = replace or staging_active
+        incoming = INCOMING_DIR if use_staging else FACES_DIR
 
         if replace:
             # Clear staging only, not the currently active dataset.
@@ -799,8 +806,12 @@ def sync_faces():
                     pass
 
         uploaded = request.files.getlist("files")
-        if not uploaded:
-            uploaded = request.files.getlist("files[]")
+        uploaded.extend(request.files.getlist("files[]"))
+
+        # PHP/cURL sends indexed multipart keys such as files[0], files[1], ... .
+        for key in request.files.keys():
+            if key.startswith("files[") and key.endswith("]") and key != "files[]":
+                uploaded.extend(request.files.getlist(key))
 
         if not uploaded:
             return jsonify({
@@ -862,7 +873,8 @@ def sync_faces():
             "success": True,
             "saved": len(saved),
             "skipped": len(skipped),
-            "replaced_dataset": replace,
+            "replaced_dataset": bool(use_staging),
+            "staging": bool(use_staging),
             "files": saved,
             "skipped_files": skipped
         })
