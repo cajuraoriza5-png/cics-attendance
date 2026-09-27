@@ -1,31 +1,22 @@
 """
+face_server.py
+===============================================================================
 CICS Attendance Face Recognition API
-LBPH + ArcFace + Hybrid
 
-Endpoints:
-GET  /
-GET  /status
-POST /detect
-POST /sync_faces
-POST /train
-GET  /train/status
-GET  /reload
-POST /recognize
+Three recognition outputs:
+1. LBPH
+2. ArcFace
+3. Hybrid ArcFace + LBPH
 
-Dataset:
-faces/<student_id>_<capture_number>.jpg|jpeg|png
-
-ArcFace:
-Uses InsightFace FaceAnalysis with the buffalo_s recognition model.
-The pretrained model is NOT retrained. During /train, embeddings are
-generated from the enrolled images and stored in arcface_embeddings.npz.
-
-LBPH:
-Still trained locally from the same enrolled images.
-
-Hybrid:
-ArcFace is the primary identity signal. LBPH is a second verification
-signal. Scores are kept separate and a calibrated hybrid decision is made.
+Important:
+- ArcFace is not retrained from scratch. InsightFace's pretrained ArcFace
+  network creates an embedding for each enrolled image.
+- /train creates:
+    trainer.yml                 -> LBPH
+    arcface_embeddings.npz      -> enrolled ArcFace embeddings
+- /recognize returns all three results separately.
+- "hybrid" is a fusion/decision algorithm, not a fourth neural network.
+===============================================================================
 """
 
 import os
@@ -42,6 +33,7 @@ from collections import Counter
 
 import numpy as np
 import cv2
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -51,46 +43,72 @@ except Exception as e:
     FaceAnalysis = None
     _INSIGHTFACE_IMPORT_ERROR = str(e)
 
+
+# =============================================================================
+# PATHS
+# =============================================================================
+
 PROJECT = os.path.dirname(os.path.abspath(__file__))
 
 FACES_DIR = os.path.join(PROJECT, "faces")
 INCOMING_DIR = os.path.join(PROJECT, "faces_incoming")
+
 TRAINER = os.path.join(PROJECT, "trainer.yml")
 ARC_DB = os.path.join(PROJECT, "arcface_embeddings.npz")
+
 STATUS_F = os.path.join(FACES_DIR, ".train_status.json")
 
 os.makedirs(FACES_DIR, exist_ok=True)
 os.makedirs(INCOMING_DIR, exist_ok=True)
 
+
+# =============================================================================
+# FLASK
+# =============================================================================
+
 app = Flask(__name__)
 CORS(app)
 
-# ---------------------------------------------------------------------------
-# Runtime configuration
-# ---------------------------------------------------------------------------
 
-# ArcFace cosine similarity:
-# 0.50 = permissive, 0.60 = moderate, 0.65 = stricter.
-# We start at 0.55 and expose the raw similarity so it can be calibrated.
-ARCFACE_THRESHOLD = float(os.environ.get("ARCFACE_THRESHOLD", "0.55"))
+@app.route("/")
+def home():
+    return "CICS Attendance ArcFace + LBPH Hybrid API is Running!"
 
-# LBPH confidence is converted only for display/verification.
-LBPH_THRESHOLD = float(os.environ.get("LBPH_THRESHOLD", "60.0"))
 
-# Hybrid minimum. The final hybrid score is 0..100.
-HYBRID_THRESHOLD = float(os.environ.get("HYBRID_THRESHOLD", "65.0"))
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
 
-# Minimum images per student for a usable identity.
-MIN_SAMPLES_PER_STUDENT = int(os.environ.get("MIN_SAMPLES_PER_STUDENT", "5"))
+ARCFACE_THRESHOLD = float(
+    os.environ.get("ARCFACE_THRESHOLD", "0.55")
+)
 
-# Ignore tiny files, which are often placeholder files.
-MIN_FILE_BYTES = int(os.environ.get("MIN_FILE_BYTES", "1024"))
+LBPH_THRESHOLD = float(
+    os.environ.get("LBPH_THRESHOLD", "60.0")
+)
+
+HYBRID_THRESHOLD = float(
+    os.environ.get("HYBRID_THRESHOLD", "65.0")
+)
+
+MIN_SAMPLES_PER_STUDENT = int(
+    os.environ.get("MIN_SAMPLES_PER_STUDENT", "3")
+)
+
+MIN_FILE_BYTES = int(
+    os.environ.get("MIN_FILE_BYTES", "1024")
+)
+
+
+# =============================================================================
+# GLOBAL MODELS
+# =============================================================================
 
 _lbph = None
 _arc_app = None
-_cascade = None
 _arc_embeddings = None
 _arc_labels = None
+_cascade = None
 
 _lock = threading.Lock()
 _train_thread = None
@@ -104,16 +122,16 @@ _models_ready = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# =============================================================================
+# STATUS HELPERS
+# =============================================================================
 
-def _write_status(state, message, progress, result=None):
+def _write_status(state, message, progress=0, result=None):
     payload = {
         "state": state,
         "message": message,
         "progress": int(max(0, min(100, progress))),
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")
     }
 
     if _training_started_at is not None:
@@ -127,11 +145,17 @@ def _write_status(state, message, progress, result=None):
     try:
         os.makedirs(FACES_DIR, exist_ok=True)
         tmp = STATUS_F + ".tmp"
+
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f)
+            json.dump(payload, f, indent=2)
+
         os.replace(tmp, STATUS_F)
+
     except Exception as e:
-        print(f"[face_server] status write failed: {e}", flush=True)
+        print(
+            f"[face_server] status write failed: {e}",
+            flush=True
+        )
 
 
 def _set_ready(name, value):
@@ -139,14 +163,9 @@ def _set_ready(name, value):
         _models_ready[name] = bool(value)
 
 
-def _update_hybrid_ready():
-    """Hybrid is ready when both independent recognizers are ready."""
-    with _lock:
-        _models_ready["hybrid"] = bool(
-            _models_ready.get("lbph", False)
-            and _models_ready.get("arcface", False)
-        )
-
+# =============================================================================
+# OPENCV / LBPH HELPERS
+# =============================================================================
 
 def _opencv_face_available():
     return (
@@ -156,10 +175,22 @@ def _opencv_face_available():
 
 
 def _lbph_confidence(distance):
-    # This is a display/verification mapping, not a probability.
-    raw = (1.0 - float(distance) / 150.0) * 100.0
-    return round(max(0.0, min(100.0, raw + 35.0)), 1)
+    """
+    Convert OpenCV LBPH distance to a display/decision score.
 
+    This is NOT a probability.
+    """
+    raw = (1.0 - float(distance) / 150.0) * 100.0
+
+    return round(
+        max(0.0, min(100.0, raw + 35.0)),
+        1
+    )
+
+
+# =============================================================================
+# ARCFACE HELPERS
+# =============================================================================
 
 def _cosine(a, b):
     a = np.asarray(a, dtype=np.float32)
@@ -175,27 +206,44 @@ def _cosine(a, b):
 
 
 def _arcface_percent(similarity):
-    # Map cosine similarity [-1,1] into a display score [0,100].
-    # Recognition still uses the raw threshold separately.
-    value = (float(similarity) + 1.0) / 2.0 * 100.0
-    return round(max(0.0, min(100.0, value)), 1)
+    """
+    Display score only.
 
+    Recognition uses raw cosine similarity and ARCFACE_THRESHOLD.
+    """
+    value = ((float(similarity) + 1.0) / 2.0) * 100.0
+
+    return round(
+        max(0.0, min(100.0, value)),
+        1
+    )
+
+
+# =============================================================================
+# DATASET HELPERS
+# =============================================================================
 
 def _parse_student_id(filename):
     """
-    Accept:
-      14_1.jpg
-      14_25.png
-      14.jpg
+    Supported examples:
+        14_1.jpg
+        14_25.png
+        14.jpg
+        14-test.jpg
 
-    Return:
-      14
+    Returns integer student ID.
     """
-    m = re.match(r"^(\d+)(?:[_-].*)?\.(jpg|jpeg|png)$",
-                 filename, flags=re.IGNORECASE)
-    if not m:
+
+    match = re.match(
+        r"^(\d+)(?:[_-].*)?\.(jpg|jpeg|png)$",
+        filename,
+        flags=re.IGNORECASE
+    )
+
+    if not match:
         return None
-    return int(m.group(1))
+
+    return int(match.group(1))
 
 
 def _iter_face_files(directory):
@@ -203,6 +251,7 @@ def _iter_face_files(directory):
         return []
 
     items = []
+
     for fname in os.listdir(directory):
         path = os.path.join(directory, fname)
 
@@ -210,30 +259,52 @@ def _iter_face_files(directory):
             continue
 
         ext = os.path.splitext(fname)[1].lower()
+
         if ext not in (".jpg", ".jpeg", ".png"):
             continue
 
-        if os.path.getsize(path) < MIN_FILE_BYTES:
+        try:
+            if os.path.getsize(path) < MIN_FILE_BYTES:
+                continue
+        except OSError:
             continue
 
         sid = _parse_student_id(fname)
+
         if sid is None:
             continue
 
         items.append((path, sid, fname))
 
-    return sorted(items, key=lambda x: x[2].lower())
+    return sorted(
+        items,
+        key=lambda x: x[2].lower()
+    )
 
 
 def _load_gray_face(path):
-    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-    if img is None:
+    image = cv2.imread(
+        path,
+        cv2.IMREAD_GRAYSCALE
+    )
+
+    if image is None:
         return None
 
-    img = cv2.resize(img, (100, 100), interpolation=cv2.INTER_AREA)
-    img = cv2.equalizeHist(img)
-    return img
+    image = cv2.resize(
+        image,
+        (100, 100),
+        interpolation=cv2.INTER_AREA
+    )
 
+    image = cv2.equalizeHist(image)
+
+    return image
+
+
+# =============================================================================
+# ARCFACE RUNTIME
+# =============================================================================
 
 def _get_arcface():
     global _arc_app
@@ -244,125 +315,220 @@ def _get_arcface():
 
     if FaceAnalysis is None:
         raise RuntimeError(
-            "InsightFace is unavailable: " +
-            globals().get("_INSIGHTFACE_IMPORT_ERROR", "unknown import error")
+            "InsightFace is unavailable: "
+            + globals().get(
+                "_INSIGHTFACE_IMPORT_ERROR",
+                "unknown import error"
+            )
         )
 
-    print("[face_server] Loading ArcFace/InsightFace buffalo_s...", flush=True)
+    print(
+        "[face_server] Loading InsightFace buffalo_s...",
+        flush=True
+    )
 
-    # buffalo_s is selected to keep the Render deployment smaller.
-    app_model = FaceAnalysis(
+    model = FaceAnalysis(
         name="buffalo_s",
         providers=["CPUExecutionProvider"]
     )
 
-    # Render CPU service. 640x640 gives better detection than tiny input.
-    app_model.prepare(ctx_id=-1, det_size=(640, 640))
+    model.prepare(
+        ctx_id=-1,
+        det_size=(640, 640)
+    )
 
     with _lock:
-        _arc_app = app_model
+        _arc_app = model
         _models_ready["arcface"] = True
 
-    print("[face_server] ArcFace/InsightFace loaded [OK]", flush=True)
-    return app_model
+    print(
+        "[face_server] ArcFace/InsightFace loaded [OK]",
+        flush=True
+    )
+
+    return model
 
 
 def _load_arcface_db():
-    global _arc_embeddings, _arc_labels
+    global _arc_embeddings
+    global _arc_labels
 
     if not os.path.exists(ARC_DB):
         with _lock:
             _arc_embeddings = None
             _arc_labels = None
             _models_ready["arcface"] = False
+            _models_ready["hybrid"] = False
+
         return False
 
     try:
-        data = np.load(ARC_DB, allow_pickle=False)
-        embeddings = np.asarray(data["embeddings"], dtype=np.float32)
-        labels = np.asarray(data["labels"], dtype=np.int32)
+        data = np.load(
+            ARC_DB,
+            allow_pickle=False
+        )
 
-        if len(embeddings) == 0 or len(labels) != len(embeddings):
-            raise ValueError("ArcFace embedding database is empty or invalid.")
+        embeddings = np.asarray(
+            data["embeddings"],
+            dtype=np.float32
+        )
+
+        labels = np.asarray(
+            data["labels"],
+            dtype=np.int32
+        )
+
+        if (
+            len(embeddings) == 0
+            or len(labels) != len(embeddings)
+        ):
+            raise ValueError(
+                "ArcFace embedding database is empty or invalid."
+            )
 
         with _lock:
             _arc_embeddings = embeddings
             _arc_labels = labels
             _models_ready["arcface"] = True
+            _models_ready["hybrid"] = (
+                _models_ready.get("lbph", False)
+                and _models_ready["arcface"]
+            )
 
         print(
             f"[face_server] Loaded ArcFace DB: "
-            f"{len(embeddings)} embeddings / {len(np.unique(labels))} students",
+            f"{len(embeddings)} embeddings / "
+            f"{len(np.unique(labels))} students",
             flush=True
         )
+
         return True
 
     except Exception as e:
-        print(f"[face_server] ArcFace DB load failed: {e}", flush=True)
+        print(
+            f"[face_server] ArcFace DB load failed: {e}",
+            flush=True
+        )
+
         with _lock:
             _arc_embeddings = None
             _arc_labels = None
             _models_ready["arcface"] = False
+            _models_ready["hybrid"] = False
+
         return False
 
 
+# =============================================================================
+# MODEL LOADING
+# =============================================================================
+
 def _load_models():
-    global _lbph, _cascade
+    global _lbph
+    global _cascade
 
-    print("[face_server] Starting ArcFace + LBPH model loading...", flush=True)
+    print(
+        "[face_server] Starting model loading...",
+        flush=True
+    )
 
-    # Haar is retained for the lightweight API bounding box.
+    # Haar detector
     _cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        cv2.data.haarcascades
+        + "haarcascade_frontalface_default.xml"
     )
 
     if _cascade.empty():
-        print("[face_server] WARNING: Haar Cascade failed.", flush=True)
+        print(
+            "[face_server] WARNING: Haar Cascade failed.",
+            flush=True
+        )
     else:
-        print("[face_server] Haar Cascade loaded [OK]", flush=True)
+        print(
+            "[face_server] Haar Cascade loaded [OK]",
+            flush=True
+        )
 
     # LBPH
-    if os.path.exists(TRAINER) and _opencv_face_available():
+    if (
+        os.path.exists(TRAINER)
+        and _opencv_face_available()
+    ):
         try:
-            rec = cv2.face.LBPHFaceRecognizer_create(
-                radius=1, neighbors=8, grid_x=8, grid_y=8
+            recognizer = (
+                cv2.face.LBPHFaceRecognizer_create(
+                    radius=1,
+                    neighbors=8,
+                    grid_x=8,
+                    grid_y=8
+                )
             )
-            rec.read(TRAINER)
+
+            recognizer.read(TRAINER)
 
             with _lock:
-                _lbph = rec
+                _lbph = recognizer
                 _models_ready["lbph"] = True
 
-            print("[face_server] LBPH loaded [OK]", flush=True)
-        except Exception as e:
-            print(f"[face_server] LBPH load failed: {e}", flush=True)
-            _set_ready("lbph", False)
-    else:
-        print("[face_server] LBPH model not available yet.", flush=True)
-        _set_ready("lbph", False)
+            print(
+                "[face_server] LBPH loaded [OK]",
+                flush=True
+            )
 
-    # ArcFace database + runtime
+        except Exception as e:
+            print(
+                f"[face_server] LBPH load failed: {e}",
+                flush=True
+            )
+
+            _set_ready("lbph", False)
+
+    else:
+        print(
+            "[face_server] LBPH model not available yet.",
+            flush=True
+        )
+
+    # ArcFace
     try:
         _get_arcface()
         _load_arcface_db()
+
     except Exception as e:
-        print(f"[face_server] ArcFace startup load failed: {e}", flush=True)
+        print(
+            f"[face_server] ArcFace startup load failed: {e}",
+            flush=True
+        )
+
         _set_ready("arcface", False)
 
     with _lock:
+        _models_ready["hybrid"] = (
+            _models_ready["lbph"]
+            and _models_ready["arcface"]
+        )
+
         _models_ready["loading"] = False
-    _update_hybrid_ready()
 
-    print("[face_server] Model loading completed.", flush=True)
+    print(
+        "[face_server] Model loading completed.",
+        flush=True
+    )
 
+
+# =============================================================================
+# ARCFACE PREDICTION
+# =============================================================================
 
 def _arcface_predict(face_color):
     """
-    Run InsightFace on the color face crop and compare the embedding with
-    all enrolled embeddings. Identity is chosen by maximum cosine similarity.
+    Generate an ArcFace embedding for the query face and compare it with
+    every enrolled embedding using cosine similarity.
     """
+
     try:
-        app_model = _get_arcface()
+        model = _get_arcface()
+
     except Exception as e:
         return {
             "id": -1,
@@ -377,7 +543,11 @@ def _arcface_predict(face_color):
         db_embeddings = _arc_embeddings
         db_labels = _arc_labels
 
-    if db_embeddings is None or db_labels is None or len(db_embeddings) == 0:
+    if (
+        db_embeddings is None
+        or db_labels is None
+        or len(db_embeddings) == 0
+    ):
         return {
             "id": -1,
             "confidence": 0.0,
@@ -388,8 +558,7 @@ def _arcface_predict(face_color):
         }
 
     try:
-        # InsightFace expects BGR images.
-        faces = app_model.get(face_color)
+        faces = model.get(face_color)
 
         if not faces:
             return {
@@ -408,53 +577,99 @@ def _arcface_predict(face_color):
             )
         )
 
-        embedding = np.asarray(face.embedding, dtype=np.float32)
-        if embedding.ndim != 1 or embedding.size == 0:
-            raise ValueError("Invalid ArcFace embedding.")
+        embedding = np.asarray(
+            face.embedding,
+            dtype=np.float32
+        )
 
-        embedding /= max(np.linalg.norm(embedding), 1e-8)
+        if (
+            embedding.ndim != 1
+            or embedding.size == 0
+        ):
+            raise ValueError(
+                "Invalid ArcFace embedding."
+            )
 
-        # Compare against every enrolled embedding.
+        norm = np.linalg.norm(embedding)
+
+        if norm <= 1e-8:
+            raise ValueError(
+                "ArcFace embedding has zero norm."
+            )
+
+        embedding = embedding / norm
+
+        # Compare query against every enrolled embedding.
         sims = np.asarray(
-            [_cosine(embedding, ref) for ref in db_embeddings],
+            [
+                _cosine(embedding, reference)
+                for reference in db_embeddings
+            ],
             dtype=np.float32
         )
 
         best_index = int(np.argmax(sims))
-        best_similarity = float(sims[best_index])
-        best_id = int(db_labels[best_index])
+        best_similarity = float(
+            sims[best_index]
+        )
+        best_id = int(
+            db_labels[best_index]
+        )
 
-        # Aggregate the best few embeddings for the winning student.
-        # This reduces dependence on one enrollment frame.
-        same_student = np.where(db_labels == best_id)[0]
+        # Average the best few examples of the winning student.
+        same_student = np.where(
+            db_labels == best_id
+        )[0]
+
         student_sims = sorted(
-            [float(sims[i]) for i in same_student],
+            [
+                float(sims[i])
+                for i in same_student
+            ],
             reverse=True
         )
 
-        top_k = student_sims[:min(5, len(student_sims))]
+        top_k = student_sims[
+            :min(5, len(student_sims))
+        ]
+
         representative_similarity = (
-            float(np.mean(top_k)) if top_k else best_similarity
+            float(np.mean(top_k))
+            if top_k
+            else best_similarity
         )
 
-        # Use the best similarity for identity, but report the representative
-        # score as the confidence-like value.
-        matched = best_similarity >= ARCFACE_THRESHOLD
+        matched = (
+            best_similarity
+            >= ARCFACE_THRESHOLD
+        )
 
         return {
-            "id": best_id if matched else best_id,
-            "confidence": _arcface_percent(representative_similarity),
-            "similarity": round(best_similarity, 5),
+            "id": best_id,
+            "confidence": _arcface_percent(
+                representative_similarity
+            ),
+            "similarity": round(
+                best_similarity,
+                5
+            ),
             "representative_similarity": round(
-                representative_similarity, 5
+                representative_similarity,
+                5
             ),
             "matched": bool(matched),
             "algorithm": "arcface",
-            "samples_compared": int(len(same_student))
+            "samples_compared": int(
+                len(same_student)
+            )
         }
 
     except Exception as e:
-        print(f"[face_server] ArcFace prediction error: {e}", flush=True)
+        print(
+            f"[face_server] ArcFace prediction error: {e}",
+            flush=True
+        )
+
         return {
             "id": -1,
             "confidence": 0.0,
@@ -464,6 +679,10 @@ def _arcface_predict(face_color):
             "error": str(e)
         }
 
+
+# =============================================================================
+# LBPH PREDICTION
+# =============================================================================
 
 def _lbph_predict(face_roi):
     with _lock:
@@ -480,16 +699,27 @@ def _lbph_predict(face_roi):
         }
 
     try:
-        sid, distance = model.predict(face_roi)
-        confidence = _lbph_confidence(distance)
+        student_id, distance = model.predict(
+            face_roi
+        )
+
+        confidence = _lbph_confidence(
+            distance
+        )
 
         return {
-            "id": int(sid),
+            "id": int(student_id),
             "confidence": confidence,
-            "distance": round(float(distance), 4),
-            "matched": bool(confidence >= LBPH_THRESHOLD),
+            "distance": round(
+                float(distance),
+                4
+            ),
+            "matched": bool(
+                confidence >= LBPH_THRESHOLD
+            ),
             "algorithm": "lbph"
         }
+
     except Exception as e:
         return {
             "id": -1,
@@ -501,103 +731,160 @@ def _lbph_predict(face_roi):
         }
 
 
+# =============================================================================
+# HYBRID ARC-FACE + LBPH
+# =============================================================================
+
 def _hybrid_predict(arc, lbph):
     """
-    Hybrid decision.
+    Hybrid algorithm.
 
-    ArcFace is primary. LBPH is a second signal.
+    ArcFace is the primary identity signal.
+    LBPH is the secondary verification signal.
 
     Cases:
-      1. ArcFace + LBPH agree -> strong hybrid score.
-      2. ArcFace passes, LBPH does not -> still allow if ArcFace is strong,
-         but lower the hybrid score.
-      3. LBPH passes but ArcFace fails -> reject by default.
-      4. They disagree -> reject.
+      - ArcFace + LBPH agree -> strongest result.
+      - ArcFace passes but LBPH fails -> only accept when ArcFace is strong.
+      - ArcFace fails -> reject.
+      - Different IDs -> reject.
     """
 
-    arc_id = int(arc.get("id", -1)) if arc else -1
-    lbph_id = int(lbph.get("id", -1)) if lbph else -1
+    arc_id = (
+        int(arc.get("id", -1))
+        if arc else -1
+    )
 
-    arc_sim = float(arc.get("similarity", 0.0)) if arc else 0.0
-    arc_conf = float(arc.get("confidence", 0.0)) if arc else 0.0
-    lbph_conf = float(lbph.get("confidence", 0.0)) if lbph else 0.0
+    lbph_id = (
+        int(lbph.get("id", -1))
+        if lbph else -1
+    )
 
-    arc_pass = bool(arc and arc.get("matched") and arc_id > 0)
-    lbph_pass = bool(lbph and lbph.get("matched") and lbph_id > 0)
+    arc_similarity = (
+        float(arc.get("similarity", 0.0))
+        if arc else 0.0
+    )
 
+    arc_confidence = (
+        float(arc.get("confidence", 0.0))
+        if arc else 0.0
+    )
+
+    lbph_confidence = (
+        float(lbph.get("confidence", 0.0))
+        if lbph else 0.0
+    )
+
+    arc_pass = bool(
+        arc
+        and arc.get("matched")
+        and arc_id > 0
+    )
+
+    lbph_pass = bool(
+        lbph
+        and lbph.get("matched")
+        and lbph_id > 0
+    )
+
+    # ArcFace must pass.
     if not arc_pass:
         return {
-            "id": arc_id if arc_id > 0 else lbph_id,
-            "confidence": round(max(0.0, min(100.0, arc_conf)), 1),
+            "id": -1,
+            "confidence": round(
+                max(0.0, arc_confidence),
+                1
+            ),
             "matched": False,
             "algorithm": "hybrid",
             "reason": "ArcFace threshold not reached",
-            "arcface_confidence": arc_conf,
-            "arcface_similarity": arc_sim,
-            "lbph_confidence": lbph_conf,
+            "arcface_confidence": arc_confidence,
+            "arcface_similarity": arc_similarity,
+            "lbph_confidence": lbph_confidence,
             "agreement": False
         }
 
-    # ArcFace passes. If LBPH identifies the same person, reward agreement.
-    if lbph_pass and lbph_id == arc_id:
-        hybrid_score = (arc_conf * 0.75) + (lbph_conf * 0.25)
+    # Both algorithms identify the same student.
+    if (
+        lbph_pass
+        and lbph_id == arc_id
+    ):
+        hybrid_score = (
+            arc_confidence * 0.75
+            + lbph_confidence * 0.25
+        )
 
         return {
             "id": arc_id,
-            "confidence": round(hybrid_score, 1),
-            "matched": bool(hybrid_score >= HYBRID_THRESHOLD),
+            "confidence": round(
+                hybrid_score,
+                1
+            ),
+            "matched": bool(
+                hybrid_score >= HYBRID_THRESHOLD
+            ),
             "algorithm": "hybrid",
             "reason": "ArcFace + LBPH agree",
-            "arcface_confidence": arc_conf,
-            "arcface_similarity": arc_sim,
-            "lbph_confidence": lbph_conf,
+            "arcface_confidence": arc_confidence,
+            "arcface_similarity": arc_similarity,
+            "lbph_confidence": lbph_confidence,
             "agreement": True
         }
 
-    # ArcFace is strong enough but LBPH did not pass.
-    # Keep it as a valid ArcFace-led result only when similarity is comfortably
-    # above threshold. The gap avoids treating marginal ArcFace matches as
-    # attendance.
-    strong_arc = arc_sim >= max(
-        ARCFACE_THRESHOLD + 0.08,
-        0.63
+    # ArcFace passed, but LBPH did not verify.
+    # Require a stronger ArcFace similarity in this situation.
+    strong_arc = (
+        arc_similarity
+        >= max(
+            ARCFACE_THRESHOLD + 0.08,
+            0.63
+        )
     )
 
-    hybrid_score = (arc_conf * 0.85) + (lbph_conf * 0.15)
+    hybrid_score = (
+        arc_confidence * 0.85
+        + lbph_confidence * 0.15
+    )
 
     return {
         "id": arc_id,
-        "confidence": round(hybrid_score, 1),
-        "matched": bool(strong_arc and hybrid_score >= HYBRID_THRESHOLD),
+        "confidence": round(
+            hybrid_score,
+            1
+        ),
+        "matched": bool(
+            strong_arc
+            and hybrid_score >= HYBRID_THRESHOLD
+        ),
         "algorithm": "hybrid",
         "reason": (
             "ArcFace accepted; LBPH did not verify"
             if not lbph_pass
-            else "ArcFace/LBPH disagreement"
+            else "ArcFace/LBPH identified different students"
         ),
-        "arcface_confidence": arc_conf,
-        "arcface_similarity": arc_sim,
-        "lbph_confidence": lbph_conf,
-        "agreement": bool(lbph_pass and lbph_id == arc_id)
+        "arcface_confidence": arc_confidence,
+        "arcface_similarity": arc_similarity,
+        "lbph_confidence": lbph_confidence,
+        "agreement": bool(
+            lbph_pass
+            and lbph_id == arc_id
+        )
     }
 
 
 def _recognize_face(face_color, face_roi):
     arc = _arcface_predict(face_color)
     lbph = _lbph_predict(face_roi)
-    hybrid = _hybrid_predict(arc, lbph)
+    hybrid = _hybrid_predict(
+        arc,
+        lbph
+    )
 
     return arc, lbph, hybrid
 
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
-
-@app.route("/")
-def home():
-    return "CICS Attendance ArcFace + LBPH API is Running!"
-
+# =============================================================================
+# STATUS
+# =============================================================================
 
 @app.route("/status")
 def status():
@@ -607,6 +894,11 @@ def status():
     return jsonify({
         "ok": True,
         "models": models,
+        "algorithms": [
+            "LBPH",
+            "ArcFace",
+            "Hybrid ArcFace + LBPH"
+        ],
         "thresholds": {
             "arcface_similarity": ARCFACE_THRESHOLD,
             "lbph_confidence": LBPH_THRESHOLD,
@@ -615,38 +907,119 @@ def status():
     })
 
 
-@app.route("/detect", methods=["POST"])
-def detect():
-    try:
-        data = request.get_json(force=True) or {}
-        image_base64 = data.get("image", "")
+# =============================================================================
+# FACE DETECTION
+# =============================================================================
 
-        image_bytes = base64.b64decode(image_base64)
-        frame = cv2.imdecode(
-            np.frombuffer(image_bytes, np.uint8),
-            cv2.IMREAD_COLOR
-        )
-    except Exception:
-        return jsonify({"bbox": None, "faces_count": 0})
-
+def _detect_largest_face(frame):
     if frame is None or _cascade is None:
-        return jsonify({"bbox": None, "faces_count": 0})
+        return None
 
-    gray = cv2.equalizeHist(
-        cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2GRAY
+    )
+
+    gray_eq = cv2.equalizeHist(
+        gray
     )
 
     detections = _cascade.detectMultiScale(
-        gray, 1.1, 5, minSize=(40, 40)
+        gray_eq,
+        1.1,
+        5,
+        minSize=(40, 40)
     )
 
     if len(detections) == 0:
         detections = _cascade.detectMultiScale(
-            gray, 1.05, 3, minSize=(30, 30)
+            gray_eq,
+            1.05,
+            3,
+            minSize=(30, 30)
         )
 
     if len(detections) == 0:
-        return jsonify({"bbox": None, "faces_count": 0})
+        return None
+
+    return max(
+        detections,
+        key=lambda r: r[2] * r[3]
+    )
+
+
+@app.route("/detect", methods=["POST"])
+def detect():
+    try:
+        data = request.get_json(
+            force=True
+        ) or {}
+
+        image_base64 = data.get(
+            "image",
+            ""
+        )
+
+        if not image_base64:
+            return jsonify({
+                "bbox": None,
+                "faces_count": 0
+            })
+
+        image_bytes = base64.b64decode(
+            image_base64
+        )
+
+        frame = cv2.imdecode(
+            np.frombuffer(
+                image_bytes,
+                np.uint8
+            ),
+            cv2.IMREAD_COLOR
+        )
+
+    except Exception:
+        return jsonify({
+            "bbox": None,
+            "faces_count": 0
+        })
+
+    if (
+        frame is None
+        or _cascade is None
+    ):
+        return jsonify({
+            "bbox": None,
+            "faces_count": 0
+        })
+
+    gray = cv2.equalizeHist(
+        cv2.cvtColor(
+            frame,
+            cv2.COLOR_BGR2GRAY
+        )
+    )
+
+    detections = _cascade.detectMultiScale(
+        gray,
+        1.1,
+        5,
+        minSize=(40, 40)
+    )
+
+    if len(detections) == 0:
+        detections = _cascade.detectMultiScale(
+            gray,
+            1.05,
+            3,
+            minSize=(30, 30)
+        )
+
+    if len(detections) == 0:
+        return jsonify({
+            "bbox": None,
+            "faces_count": 0
+        })
 
     x, y, w, h = max(
         detections,
@@ -660,79 +1033,129 @@ def detect():
             "w": int(w),
             "h": int(h)
         },
-        "faces_count": int(len(detections))
+        "faces_count": int(
+            len(detections)
+        )
     })
 
+
+# =============================================================================
+# RECOGNITION
+# =============================================================================
 
 @app.route("/recognize", methods=["POST"])
 def recognize():
     result = {
         "faces_count": 0,
         "bbox": None,
-        "arcface": {"error": "not run"},
-        "lbph": {"error": "not run"},
-        "hybrid": {"error": "not run"}
+        "arcface": {
+            "error": "not run"
+        },
+        "lbph": {
+            "error": "not run"
+        },
+        "hybrid": {
+            "error": "not run"
+        }
     }
 
     try:
-        data = request.get_json(force=True) or {}
-        image_base64 = data.get("image", "")
+        data = request.get_json(
+            force=True
+        ) or {}
+
+        image_base64 = data.get(
+            "image",
+            ""
+        )
 
         if not image_base64:
-            return jsonify({"error": "No image data received."}), 400
+            return jsonify({
+                "error": "No image data received."
+            }), 400
 
-        image_bytes = base64.b64decode(image_base64)
+        image_bytes = base64.b64decode(
+            image_base64
+        )
+
         frame = cv2.imdecode(
-            np.frombuffer(image_bytes, np.uint8),
+            np.frombuffer(
+                image_bytes,
+                np.uint8
+            ),
             cv2.IMREAD_COLOR
         )
+
     except Exception as e:
-        return jsonify({"error": f"Input error: {e}"}), 400
+        return jsonify({
+            "error": f"Input error: {e}"
+        }), 400
 
     if frame is None:
-        return jsonify({"error": "Empty frame"}), 400
+        return jsonify({
+            "error": "Empty frame"
+        }), 400
 
     if _cascade is None:
-        return jsonify({"error": "Face detector is not ready"}), 503
+        return jsonify({
+            "error": "Face detector is not ready"
+        }), 503
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    gray_eq = cv2.equalizeHist(gray)
+    # Detect face
+    gray = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2GRAY
+    )
+
+    gray_eq = cv2.equalizeHist(
+        gray
+    )
 
     detections = _cascade.detectMultiScale(
-        gray_eq, 1.1, 5, minSize=(40, 40)
+        gray_eq,
+        1.1,
+        5,
+        minSize=(40, 40)
     )
 
     if len(detections) == 0:
         detections = _cascade.detectMultiScale(
-            gray_eq, 1.05, 3, minSize=(30, 30)
+            gray_eq,
+            1.05,
+            3,
+            minSize=(30, 30)
         )
 
-    result["faces_count"] = int(len(detections))
+    result["faces_count"] = int(
+        len(detections)
+    )
 
     if len(detections) == 0:
-        result["arcface"] = {
+        no_face = {
             "id": -1,
             "confidence": 0.0,
-            "similarity": 0.0,
             "matched": False,
-            "algorithm": "arcface",
+            "algorithm": "no_face",
             "error": "No face detected"
         }
-        result["lbph"] = {
-            "id": -1,
-            "confidence": 0.0,
-            "distance": 999.0,
-            "matched": False,
-            "algorithm": "lbph",
-            "error": "No face detected"
-        }
-        result["hybrid"] = {
-            "id": -1,
-            "confidence": 0.0,
-            "matched": False,
-            "algorithm": "hybrid",
-            "reason": "No face detected"
-        }
+
+        result["arcface"] = dict(
+            no_face,
+            algorithm="arcface"
+        )
+
+        result["lbph"] = dict(
+            no_face,
+            algorithm="lbph",
+            distance=999.0
+        )
+
+        result["hybrid"] = dict(
+            no_face,
+            algorithm="hybrid",
+            reason="No face detected"
+        )
+
         return jsonify(result)
 
     x, y, w, h = max(
@@ -747,22 +1170,45 @@ def recognize():
         "h": int(h)
     }
 
-    # Slight padding improves ArcFace when Haar box is tight.
+    # Padding for ArcFace crop.
     pad_x = int(w * 0.12)
     pad_y = int(h * 0.12)
 
-    x1 = max(0, x - pad_x)
-    y1 = max(0, y - pad_y)
-    x2 = min(frame.shape[1], x + w + pad_x)
-    y2 = min(frame.shape[0], y + h + pad_y)
+    x1 = max(
+        0,
+        x - pad_x
+    )
 
-    face_color = frame[y1:y2, x1:x2]
+    y1 = max(
+        0,
+        y - pad_y
+    )
+
+    x2 = min(
+        frame.shape[1],
+        x + w + pad_x
+    )
+
+    y2 = min(
+        frame.shape[0],
+        y + h + pad_y
+    )
+
+    face_color = frame[
+        y1:y2,
+        x1:x2
+    ]
+
     face_roi = cv2.resize(
-        gray_eq[y:y+h, x:x+w],
+        gray_eq[
+            y:y+h,
+            x:x+w
+        ],
         (100, 100),
         interpolation=cv2.INTER_AREA
     )
 
+    # Run all three algorithms.
     arc, lbph, hybrid = _recognize_face(
         face_color,
         face_roi
@@ -775,43 +1221,100 @@ def recognize():
     return jsonify(result)
 
 
-# ---------------------------------------------------------------------------
-# Dataset synchronization
-# ---------------------------------------------------------------------------
+# =============================================================================
+# SYNC ENROLLED FACE IMAGES
+# =============================================================================
 
 @app.route("/sync_faces", methods=["POST"])
 def sync_faces():
     """
-    Receives multipart:
-      files[0], files[1], ...
-      replace=1 on the first batch.
+    Receives:
+        files[0], files[1], ...
+        replace=1 on the first batch.
 
-    Files are staged into faces_incoming when replace=1. The existing live
-    dataset is not destroyed until /train is called after all batches arrive.
+    Replacement uploads are staged in faces_incoming.
+    The active dataset is replaced only when /train starts.
     """
 
     try:
         replace = str(
-            request.form.get("replace", "0")
-        ).lower() in ("1", "true", "yes")
+            request.form.get(
+                "replace",
+                "0"
+            )
+        ).lower() in (
+            "1",
+            "true",
+            "yes"
+        )
 
-        incoming = INCOMING_DIR if replace else FACES_DIR
+        # Detect an active staged upload.
+        staging_active = any(
+            os.path.isfile(
+                os.path.join(
+                    INCOMING_DIR,
+                    name
+                )
+            )
+            for name in os.listdir(
+                INCOMING_DIR
+            )
+        )
+
+        use_staging = (
+            replace
+            or staging_active
+        )
+
+        incoming = (
+            INCOMING_DIR
+            if use_staging
+            else FACES_DIR
+        )
 
         if replace:
-            # Clear staging only, not the currently active dataset.
-            for old in os.listdir(INCOMING_DIR):
-                path = os.path.join(INCOMING_DIR, old)
+            # Clear previous staged batch.
+            for old in os.listdir(
+                INCOMING_DIR
+            ):
+                path = os.path.join(
+                    INCOMING_DIR,
+                    old
+                )
+
                 try:
-                    if os.path.isfile(path) or os.path.islink(path):
+                    if (
+                        os.path.isfile(path)
+                        or os.path.islink(path)
+                    ):
                         os.remove(path)
+
                     elif os.path.isdir(path):
                         shutil.rmtree(path)
+
                 except Exception:
                     pass
 
-        uploaded = request.files.getlist("files")
-        if not uploaded:
-            uploaded = request.files.getlist("files[]")
+        uploaded = request.files.getlist(
+            "files"
+        )
+
+        uploaded.extend(
+            request.files.getlist(
+                "files[]"
+            )
+        )
+
+        # Also accept files[0], files[1], ...
+        for key in request.files.keys():
+            if (
+                key.startswith("files[")
+                and key.endswith("]")
+                and key != "files[]"
+            ):
+                uploaded.extend(
+                    request.files.getlist(key)
+                )
 
         if not uploaded:
             return jsonify({
@@ -822,8 +1325,10 @@ def sync_faces():
         saved = []
         skipped = []
 
-        for f in uploaded:
-            filename = os.path.basename(f.filename or "")
+        for uploaded_file in uploaded:
+            filename = os.path.basename(
+                uploaded_file.filename or ""
+            )
 
             if not filename:
                 continue
@@ -839,70 +1344,156 @@ def sync_faces():
                 })
                 continue
 
-            # Save then validate.
-            destination = os.path.join(incoming, filename)
-            f.save(destination)
+            destination = os.path.join(
+                incoming,
+                filename
+            )
 
-            if not os.path.exists(destination):
+            uploaded_file.save(
+                destination
+            )
+
+            if not os.path.exists(
+                destination
+            ):
                 skipped.append({
                     "file": filename,
                     "reason": "save failed"
                 })
                 continue
 
-            if os.path.getsize(destination) < MIN_FILE_BYTES:
-                os.remove(destination)
+            if os.path.getsize(
+                destination
+            ) < MIN_FILE_BYTES:
+                os.remove(
+                    destination
+                )
+
                 skipped.append({
                     "file": filename,
                     "reason": "file too small"
                 })
+
                 continue
 
-            test = cv2.imread(destination)
+            test = cv2.imread(
+                destination
+            )
+
             if test is None:
-                os.remove(destination)
+                os.remove(
+                    destination
+                )
+
                 skipped.append({
                     "file": filename,
                     "reason": "unreadable image"
                 })
+
                 continue
 
-            saved.append(filename)
+            saved.append(
+                filename
+            )
 
         return jsonify({
             "success": True,
             "saved": len(saved),
             "skipped": len(skipped),
-            "replaced_dataset": replace,
+            "staging": bool(use_staging),
             "files": saved,
             "skipped_files": skipped
         })
 
     except Exception as e:
         traceback.print_exc()
+
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
 
 
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
+# =============================================================================
+# TRAINING
+# =============================================================================
+
+def _swap_incoming_dataset():
+    """
+    Move staged images into the active faces/ directory.
+    """
+
+    if not os.path.isdir(
+        INCOMING_DIR
+    ):
+        return False
+
+    incoming_files = _iter_face_files(
+        INCOMING_DIR
+    )
+
+    if not incoming_files:
+        return False
+
+    # Remove old active face images.
+    for fname in os.listdir(
+        FACES_DIR
+    ):
+        path = os.path.join(
+            FACES_DIR,
+            fname
+        )
+
+        if not os.path.isfile(path):
+            continue
+
+        ext = os.path.splitext(
+            fname
+        )[1].lower()
+
+        if ext in (
+            ".jpg",
+            ".jpeg",
+            ".png"
+        ):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+    # Move staged files into active dataset.
+    for path, _, fname in incoming_files:
+        destination = os.path.join(
+            FACES_DIR,
+            fname
+        )
+
+        os.replace(
+            path,
+            destination
+        )
+
+    return True
+
 
 def _build_training_dataset():
-    files = _iter_face_files(FACES_DIR)
+    files = _iter_face_files(
+        FACES_DIR
+    )
 
     if not files:
         raise RuntimeError(
             "No valid face images found in faces/."
         )
 
-    groups = Counter(sid for _, sid, _ in files)
+    groups = Counter(
+        sid
+        for _, sid, _ in files
+    )
 
-    # Drop students with too few images.
     usable_ids = {
-        sid for sid, count in groups.items()
+        sid
+        for sid, count in groups.items()
         if count >= MIN_SAMPLES_PER_STUDENT
     }
 
@@ -913,11 +1504,12 @@ def _build_training_dataset():
     }
 
     files = [
-        item for item in files
+        item
+        for item in files
         if item[1] in usable_ids
     ]
 
-    if len(usable_ids) < 1:
+    if not usable_ids:
         raise RuntimeError(
             "No student has enough valid face images for training."
         )
@@ -925,194 +1517,87 @@ def _build_training_dataset():
     return files, dropped
 
 
-def _train_lbph(files):
+def _run_training_script():
+    """
+    Run train_all_models.py so LBPH and ArcFace embedding generation
+    are kept in one training module.
+    """
+
+    train_script = os.path.join(
+        PROJECT,
+        "train_all_models.py"
+    )
+
+    if not os.path.exists(
+        train_script
+    ):
+        raise RuntimeError(
+            "train_all_models.py was not found."
+        )
+
+    process = subprocess.run(
+        [
+            sys.executable,
+            train_script
+        ],
+        cwd=PROJECT,
+        env=os.environ.copy(),
+        text=True
+    )
+
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"train_all_models.py exited with code "
+            f"{process.returncode}"
+        )
+
+
+def _reload_after_training():
+    global _lbph
+
+    if not os.path.exists(
+        TRAINER
+    ):
+        raise RuntimeError(
+            "LBPH trainer.yml was not created."
+        )
+
     if not _opencv_face_available():
         raise RuntimeError(
-            "opencv-contrib-python is required for LBPH."
+            "OpenCV contrib face module is unavailable."
         )
 
-    faces = []
-    labels = []
-
-    for path, sid, fname in files:
-        gray = _load_gray_face(path)
-
-        if gray is None:
-            continue
-
-        faces.append(gray)
-        labels.append(sid)
-
-    if not faces:
-        raise RuntimeError("No readable grayscale faces for LBPH.")
-
-    recognizer = cv2.face.LBPHFaceRecognizer_create(
-        radius=1,
-        neighbors=8,
-        grid_x=8,
-        grid_y=8
-    )
-
-    recognizer.train(
-        faces,
-        np.asarray(labels, dtype=np.int32)
-    )
-
-    temp = TRAINER + ".tmp"
-    recognizer.write(temp)
-    os.replace(temp, TRAINER)
-
-    return {
-        "ok": True,
-        "samples": len(faces),
-        "students": len(set(labels))
-    }
-
-
-def _train_arcface(files):
-    global _arc_embeddings, _arc_labels
-
-    app_model = _get_arcface()
-
-    embeddings = []
-    labels = []
-    failed = []
-
-    total = len(files)
-
-    for index, (path, sid, fname) in enumerate(files, start=1):
-        try:
-            image = cv2.imread(path, cv2.IMREAD_COLOR)
-
-            if image is None:
-                failed.append(fname)
-                continue
-
-            faces = app_model.get(image)
-
-            if not faces:
-                failed.append(fname)
-                continue
-
-            face = max(
-                faces,
-                key=lambda f: float(
-                    getattr(f, "det_score", 0.0) or 0.0
-                )
-            )
-
-            emb = np.asarray(
-                face.embedding,
-                dtype=np.float32
-            )
-
-            if emb.ndim != 1 or emb.size == 0:
-                failed.append(fname)
-                continue
-
-            norm = np.linalg.norm(emb)
-            if norm <= 1e-8:
-                failed.append(fname)
-                continue
-
-            emb = emb / norm
-
-            embeddings.append(emb)
-            labels.append(sid)
-
-            # Training progress: ArcFace embedding generation is the expensive
-            # phase, so report it continuously.
-            progress = 35 + int(
-                (index / max(1, total)) * 45
-            )
-            _write_status(
-                "running",
-                f"Generating ArcFace embeddings {index}/{total}...",
-                progress
-            )
-
-        except Exception as e:
-            print(
-                f"[face_server] ArcFace enrollment failed "
-                f"{fname}: {e}",
-                flush=True
-            )
-            failed.append(fname)
-
-    if not embeddings:
-        raise RuntimeError(
-            "ArcFace could not generate any embeddings. "
-            "Check that enrolled images contain detectable faces."
+    recognizer = (
+        cv2.face.LBPHFaceRecognizer_create(
+            radius=1,
+            neighbors=8,
+            grid_x=8,
+            grid_y=8
         )
-
-    embedding_array = np.asarray(
-        embeddings,
-        dtype=np.float32
-    )
-    label_array = np.asarray(
-        labels,
-        dtype=np.int32
     )
 
-    temp = ARC_DB + ".tmp.npz"
-
-    np.savez_compressed(
-        temp,
-        embeddings=embedding_array,
-        labels=label_array
-    )
-
-    # np.savez adds .npz if the filename does not end in .npz.
-    actual_temp = temp if os.path.exists(temp) else temp + ".npz"
-
-    os.replace(
-        actual_temp,
-        ARC_DB
+    recognizer.read(
+        TRAINER
     )
 
     with _lock:
-        _arc_embeddings = embedding_array
-        _arc_labels = label_array
-        _models_ready["arcface"] = True
+        _lbph = recognizer
+        _models_ready["lbph"] = True
 
-    return {
-        "ok": True,
-        "samples": int(len(embedding_array)),
-        "students": int(len(np.unique(label_array))),
-        "failed_images": failed[:50],
-        "failed_count": len(failed)
-    }
+    if not _load_arcface_db():
+        raise RuntimeError(
+            "ArcFace embedding database was not created."
+        )
 
-
-def _swap_incoming_dataset():
-    if not os.path.isdir(INCOMING_DIR):
-        return False
-
-    incoming_files = _iter_face_files(INCOMING_DIR)
-    if not incoming_files:
-        return False
-
-    # Keep status file and any non-image operational files in faces/.
-    for fname in os.listdir(FACES_DIR):
-        path = os.path.join(FACES_DIR, fname)
-        if os.path.isfile(path):
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in (".jpg", ".jpeg", ".png"):
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-
-    for path, _, fname in incoming_files:
-        destination = os.path.join(FACES_DIR, fname)
-        os.replace(path, destination)
-
-    return True
+    with _lock:
+        _models_ready["hybrid"] = True
 
 
 def _do_train():
-    global _lbph, _arc_app, _arc_embeddings, _arc_labels
     global _training_started_at
+    global _lbph
+    global _arc_embeddings
+    global _arc_labels
 
     _training_started_at = time.time()
 
@@ -1123,28 +1608,36 @@ def _do_train():
             5
         )
 
-        # If the retraining flow uploaded a replacement dataset, activate it
-        # only now, after all batches have been received.
+        # Activate the newest synchronized dataset.
         _swap_incoming_dataset()
 
-        files, dropped = _build_training_dataset()
+        files, dropped = (
+            _build_training_dataset()
+        )
 
-        counts = Counter(sid for _, sid, _ in files)
+        counts = Counter(
+            sid
+            for _, sid, _ in files
+        )
 
         print(
-            f"[face_server] Training {len(files)} images "
-            f"from {len(counts)} students.",
+            f"[face_server] Training {len(files)} "
+            f"images from {len(counts)} students.",
             flush=True
         )
+
         print(
-            f"[face_server] Samples per student: {dict(sorted(counts.items()))}",
+            f"[face_server] Samples per student: "
+            f"{dict(sorted(counts.items()))}",
             flush=True
         )
 
         _write_status(
             "running",
-            f"Dataset ready: {len(files)} images / "
-            f"{len(counts)} students.",
+            (
+                f"Dataset ready: {len(files)} "
+                f"images / {len(counts)} students."
+            ),
             15,
             {
                 "students": len(counts),
@@ -1156,65 +1649,58 @@ def _do_train():
             }
         )
 
-        # Invalidate old in-memory models before replacing them.
+        # Invalidate old in-memory models.
         with _lock:
             _lbph = None
             _arc_embeddings = None
             _arc_labels = None
+
             _models_ready["lbph"] = False
             _models_ready["arcface"] = False
             _models_ready["hybrid"] = False
 
-        # LBPH
         _write_status(
             "running",
-            "Training LBPH...",
-            20
+            "Training LBPH + generating ArcFace embeddings...",
+            25
         )
 
-        lbph_result = _train_lbph(files)
-
-        _write_status(
-            "running",
-            "LBPH completed. Preparing ArcFace...",
-            35,
-            {"lbph": lbph_result}
-        )
-
-        # ArcFace embeddings
-        arc_result = _train_arcface(files)
+        _run_training_script()
 
         _write_status(
             "running",
-            "Reloading trained models...",
-            90,
-            {
-                "lbph": lbph_result,
-                "arcface": arc_result
-            }
+            "Reloading LBPH and ArcFace models...",
+            90
         )
 
-        # Reload LBPH from disk.
-        rec = cv2.face.LBPHFaceRecognizer_create(
-            radius=1,
-            neighbors=8,
-            grid_x=8,
-            grid_y=8
-        )
-        rec.read(TRAINER)
-
-        with _lock:
-            _lbph = rec
-            _models_ready["lbph"] = True
-
-        _load_arcface_db()
-        _update_hybrid_ready()
+        _reload_after_training()
 
         result = {
-            "lbph": lbph_result,
-            "arcface": arc_result,
-            "students": len(counts),
+            "lbph": {
+                "ok": os.path.exists(
+                    TRAINER
+                ),
+                "samples": len(files),
+                "students": len(counts)
+            },
+            "arcface": {
+                "ok": os.path.exists(
+                    ARC_DB
+                ),
+                "samples": len(files),
+                "students": len(counts)
+            },
+            "hybrid": {
+                "ok": (
+                    os.path.exists(TRAINER)
+                    and os.path.exists(ARC_DB)
+                ),
+                "description": (
+                    "ArcFace primary + LBPH verification"
+                )
+            },
             "samples": len(files),
+            "students": len(counts),
             "samples_per_student": dict(
                 sorted(counts.items())
             ),
@@ -1223,13 +1709,14 @@ def _do_train():
 
         _write_status(
             "done",
-            "LBPH and ArcFace training completed.",
+            "LBPH, ArcFace and Hybrid training completed.",
             100,
             result
         )
 
         print(
-            "[face_server] LBPH + ArcFace training completed [OK]",
+            "[face_server] LBPH + ArcFace + Hybrid "
+            "training completed [OK]",
             flush=True
         )
 
@@ -1240,11 +1727,14 @@ def _do_train():
             _models_ready["lbph"] = bool(
                 os.path.exists(TRAINER)
             )
+
             _models_ready["arcface"] = bool(
                 os.path.exists(ARC_DB)
             )
-            _models_ready["hybrid"] = bool(
-                _models_ready["lbph"] and _models_ready["arcface"]
+
+            _models_ready["hybrid"] = (
+                _models_ready["lbph"]
+                and _models_ready["arcface"]
             )
 
         _write_status(
@@ -1265,11 +1755,17 @@ def _do_train():
         _training_started_at = None
 
 
-@app.route("/train", methods=["POST"])
+@app.route(
+    "/train",
+    methods=["POST"]
+)
 def train():
     global _train_thread
 
-    if _train_thread and _train_thread.is_alive():
+    if (
+        _train_thread
+        and _train_thread.is_alive()
+    ):
         return jsonify({
             "success": False,
             "message": "Training already in progress"
@@ -1279,19 +1775,29 @@ def train():
         target=_do_train,
         daemon=True
     )
+
     _train_thread.start()
 
     return jsonify({
         "success": True,
-        "message": "ArcFace + LBPH training started"
+        "message": (
+            "LBPH + ArcFace + Hybrid training started"
+        )
     })
 
 
 @app.route("/train/status")
 def train_status():
     try:
-        with open(STATUS_F, "r", encoding="utf-8") as f:
-            return jsonify(json.load(f))
+        with open(
+            STATUS_F,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            return jsonify(
+                json.load(f)
+            )
+
     except Exception:
         return jsonify({
             "state": "unknown",
@@ -1300,7 +1806,14 @@ def train_status():
         })
 
 
-@app.route("/reload", methods=["GET", "POST"])
+# =============================================================================
+# RELOAD
+# =============================================================================
+
+@app.route(
+    "/reload",
+    methods=["GET", "POST"]
+)
 def reload_models():
     global _lbph
 
@@ -1312,16 +1825,21 @@ def reload_models():
         and _opencv_face_available()
     ):
         try:
-            rec = cv2.face.LBPHFaceRecognizer_create(
-                radius=1,
-                neighbors=8,
-                grid_x=8,
-                grid_y=8
+            recognizer = (
+                cv2.face.LBPHFaceRecognizer_create(
+                    radius=1,
+                    neighbors=8,
+                    grid_x=8,
+                    grid_y=8
+                )
             )
-            rec.read(TRAINER)
+
+            recognizer.read(
+                TRAINER
+            )
 
             with _lock:
-                _lbph = rec
+                _lbph = recognizer
                 _models_ready["lbph"] = True
 
             loaded["lbph"] = True
@@ -1329,19 +1847,32 @@ def reload_models():
         except Exception as e:
             loaded["lbph"] = False
             loaded["lbph_error"] = str(e)
+
     else:
         loaded["lbph"] = False
         loaded["lbph_error"] = "trainer.yml missing"
 
-    # ArcFace database
+    # ArcFace
     try:
         _get_arcface()
-        loaded["arcface"] = _load_arcface_db()
+
+        loaded["arcface"] = (
+            _load_arcface_db()
+        )
+
     except Exception as e:
         loaded["arcface"] = False
         loaded["arcface_error"] = str(e)
 
-    _update_hybrid_ready()
+    with _lock:
+        _models_ready["hybrid"] = (
+            _models_ready["lbph"]
+            and _models_ready["arcface"]
+        )
+
+    loaded["hybrid"] = (
+        _models_ready["hybrid"]
+    )
 
     return jsonify({
         "ok": True,
@@ -1350,9 +1881,14 @@ def reload_models():
     })
 
 
+# =============================================================================
+# START SERVER
+# =============================================================================
+
 if __name__ == "__main__":
     print(
-        "[face_server] Starting CICS ArcFace + LBPH API...",
+        "[face_server] Starting CICS "
+        "LBPH + ArcFace + Hybrid API...",
         flush=True
     )
 
@@ -1360,10 +1896,14 @@ if __name__ == "__main__":
         target=_load_models,
         daemon=True
     )
+
     thread.start()
 
     port = int(
-        os.environ.get("PORT", 5001)
+        os.environ.get(
+            "PORT",
+            5001
+        )
     )
 
     app.run(
