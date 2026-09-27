@@ -2,6 +2,7 @@ Flask
 flask-cors
 numpy==1.26.4
 opencv-contrib-python-headless==4.10.0.84
+onnx==1.23.0
 insightface==0.7.3
 onnxruntime==1.30.0
 gunicorn
