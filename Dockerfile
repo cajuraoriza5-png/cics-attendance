@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System libraries and build tools needed by InsightFace
+# System libraries required by OpenCV and InsightFace
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
@@ -12,28 +12,18 @@ RUN apt-get update && apt-get install -y \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements
-COPY requirements.txt .
-
 # Upgrade pip
 RUN pip install --no-cache-dir --upgrade pip
 
-# Install packages that have prebuilt wheels first
+# Install binary packages first
 RUN pip install --no-cache-dir \
     numpy==1.26.4 \
     onnx==1.23.0 \
     onnxruntime==1.30.0 \
     opencv-contrib-python-headless==4.10.0.84
 
-# Install InsightFace separately because 0.7.3 is source-only on PyPI
+# Install dependencies required by InsightFace
 RUN pip install --no-cache-dir \
-    --no-deps \
-    insightface==0.7.3
-
-# Install remaining dependencies
-RUN pip install --no-cache-dir \
-    flask \
-    flask-cors \
     tqdm \
     requests \
     scipy \
@@ -44,7 +34,17 @@ RUN pip install --no-cache-dir \
     albumentations \
     prettytable \
     matplotlib \
-    Pillow \
+    Pillow
+
+# Install InsightFace separately
+RUN pip install --no-cache-dir \
+    --no-deps \
+    insightface==0.7.3
+
+# Install Flask and Gunicorn
+RUN pip install --no-cache-dir \
+    Flask \
+    flask-cors \
     gunicorn
 
 # Copy application
