@@ -1,59 +1,26 @@
-FROM python:3.11-slim
+Flask
+flask-cors
 
-WORKDIR /app
+numpy==1.26.4
 
-# System libraries and build tools needed by InsightFace
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    cmake \
-    g++ \
-    libglib2.0-0 \
-    libgl1 \
-    libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+opencv-contrib-python-headless==4.10.0.84
 
-# Copy requirements
-COPY requirements.txt .
+onnx==1.23.0
+onnxruntime==1.30.0
 
-# Upgrade pip
-RUN pip install --no-cache-dir --upgrade pip
+insightface==0.7.3
 
-# Install packages that have prebuilt wheels first
-RUN pip install --no-cache-dir \
-    numpy==1.26.4 \
-    onnx==1.23.0 \
-    onnxruntime==1.30.0 \
-    opencv-contrib-python-headless==4.10.0.84
+scipy
+scikit-learn
+scikit-image
 
-# Install InsightFace separately because 0.7.3 is source-only on PyPI
-RUN pip install --no-cache-dir \
-    --no-deps \
-    insightface==0.7.3
+easydict
+cython
+albumentations
+prettytable
+matplotlib
+Pillow
+requests
+tqdm
 
-# Install remaining dependencies
-RUN pip install --no-cache-dir \
-    flask \
-    flask-cors \
-    tqdm \
-    requests \
-    scipy \
-    scikit-learn \
-    scikit-image \
-    easydict \
-    cython \
-    albumentations \
-    prettytable \
-    matplotlib \
-    Pillow \
-    gunicorn
-
-# Copy application
-COPY face_server.py .
-COPY train_all_models.py .
-
-# Create faces directory
-RUN mkdir -p faces
-
-EXPOSE 5001
-
-CMD ["gunicorn", "face_server:app", "--bind", "0.0.0.0:5001", "--workers", "1", "--timeout", "120"]
+gunicorn
