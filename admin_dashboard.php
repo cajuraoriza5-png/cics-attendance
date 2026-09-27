@@ -1093,7 +1093,10 @@ function setProgress(pct, msg){
 function applyRenderStatus(d){
     if(!d || !d.state) return false;
 
-    const ts = d.timestamp ? Date.parse(String(d.timestamp)) : 0;
+    // Render reports UTC without a zone suffix, so parse it as UTC.
+    const ts = Number.isFinite(Number(d.started_at_epoch))
+        ? Number(d.started_at_epoch) * 1000
+        : (d.timestamp ? Date.parse(String(d.timestamp) + 'Z') : 0);
     // Ignore an old result from a previous training run.
     if(_trainingStartTime && ts && ts < (_trainingStartTime - 2000)) return false;
 
