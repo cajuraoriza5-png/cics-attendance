@@ -1,6 +1,6 @@
 """
 CICS Attendance Face Recognition API
-ArcFace + LBPH Hybrid
+LBPH + ArcFace + Hybrid
 
 Endpoints:
 GET  /
@@ -99,6 +99,7 @@ _training_started_at = None
 _models_ready = {
     "lbph": False,
     "arcface": False,
+    "hybrid": False,
     "loading": True
 }
 
@@ -136,6 +137,15 @@ def _write_status(state, message, progress, result=None):
 def _set_ready(name, value):
     with _lock:
         _models_ready[name] = bool(value)
+
+
+def _update_hybrid_ready():
+    """Hybrid is ready when both independent recognizers are ready."""
+    with _lock:
+        _models_ready["hybrid"] = bool(
+            _models_ready.get("lbph", False)
+            and _models_ready.get("arcface", False)
+        )
 
 
 def _opencv_face_available():
@@ -341,6 +351,7 @@ def _load_models():
 
     with _lock:
         _models_ready["loading"] = False
+    _update_hybrid_ready()
 
     print("[face_server] Model loading completed.", flush=True)
 
@@ -784,14 +795,7 @@ def sync_faces():
             request.form.get("replace", "0")
         ).lower() in ("1", "true", "yes")
 
-        # Continue a replacement upload in the staging directory across all
-        # batches. The PHP uploader sends replace=1 only on the first batch.
-        staging_active = any(
-            os.path.isfile(os.path.join(INCOMING_DIR, name))
-            for name in os.listdir(INCOMING_DIR)
-        )
-        use_staging = replace or staging_active
-        incoming = INCOMING_DIR if use_staging else FACES_DIR
+        incoming = INCOMING_DIR if replace else FACES_DIR
 
         if replace:
             # Clear staging only, not the currently active dataset.
@@ -806,12 +810,8 @@ def sync_faces():
                     pass
 
         uploaded = request.files.getlist("files")
-        uploaded.extend(request.files.getlist("files[]"))
-
-        # PHP/cURL sends indexed multipart keys such as files[0], files[1], ... .
-        for key in request.files.keys():
-            if key.startswith("files[") and key.endswith("]") and key != "files[]":
-                uploaded.extend(request.files.getlist(key))
+        if not uploaded:
+            uploaded = request.files.getlist("files[]")
 
         if not uploaded:
             return jsonify({
@@ -873,8 +873,7 @@ def sync_faces():
             "success": True,
             "saved": len(saved),
             "skipped": len(skipped),
-            "replaced_dataset": bool(use_staging),
-            "staging": bool(use_staging),
+            "replaced_dataset": replace,
             "files": saved,
             "skipped_files": skipped
         })
@@ -1164,6 +1163,7 @@ def _do_train():
             _arc_labels = None
             _models_ready["lbph"] = False
             _models_ready["arcface"] = False
+            _models_ready["hybrid"] = False
 
         # LBPH
         _write_status(
@@ -1208,6 +1208,7 @@ def _do_train():
             _models_ready["lbph"] = True
 
         _load_arcface_db()
+        _update_hybrid_ready()
 
         result = {
             "lbph": lbph_result,
@@ -1241,6 +1242,9 @@ def _do_train():
             )
             _models_ready["arcface"] = bool(
                 os.path.exists(ARC_DB)
+            )
+            _models_ready["hybrid"] = bool(
+                _models_ready["lbph"] and _models_ready["arcface"]
             )
 
         _write_status(
@@ -1336,6 +1340,8 @@ def reload_models():
     except Exception as e:
         loaded["arcface"] = False
         loaded["arcface_error"] = str(e)
+
+    _update_hybrid_ready()
 
     return jsonify({
         "ok": True,
