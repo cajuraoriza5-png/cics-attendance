@@ -36,7 +36,18 @@ import json
 import time
 import traceback
 import re
+import gc
 from collections import Counter
+
+# Keep ONNX/BLAS memory low on small Render instances.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("ORT_INTRA_OP_NUM_THREADS", "1")
+os.environ.setdefault("ORT_INTER_OP_NUM_THREADS", "1")
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 
 import cv2
 import numpy as np
@@ -419,7 +430,7 @@ def get_arcface():
 
     model.prepare(
         ctx_id=-1,
-        det_size=(640, 640)
+        det_size=(320, 320)
     )
 
     print(
@@ -602,6 +613,13 @@ def train_arcface(
         f"[train] ArcFace DB saved: {ARC_DB}",
         flush=True
     )
+
+    # Release ONNX/InsightFace memory before this process exits.
+    try:
+        del model
+    except Exception:
+        pass
+    gc.collect()
 
     return {
         "ok": True,
