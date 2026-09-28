@@ -1885,19 +1885,30 @@ def reload_models():
 # START SERVER
 # =============================================================================
 
+# =============================================================================
+# START MODEL LOADER
+# =============================================================================
+
+print(
+    "[face_server] Starting CICS "
+    "LBPH + ArcFace + Hybrid API...",
+    flush=True
+)
+
+thread = threading.Thread(
+    target=_load_models,
+    daemon=True,
+    name="model-loader"
+)
+
+thread.start()
+
+
+# =============================================================================
+# LOCAL DEVELOPMENT SERVER
+# =============================================================================
+
 if __name__ == "__main__":
-    print(
-        "[face_server] Starting CICS "
-        "LBPH + ArcFace + Hybrid API...",
-        flush=True
-    )
-
-    thread = threading.Thread(
-        target=_load_models,
-        daemon=True
-    )
-
-    thread.start()
 
     port = int(
         os.environ.get(
