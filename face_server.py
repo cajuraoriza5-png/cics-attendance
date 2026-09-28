@@ -110,6 +110,12 @@ MIN_FILE_BYTES = int(
     os.environ.get("MIN_FILE_BYTES", "1024")
 )
 
+# Smaller detector size reduces CPU/RAM use on small Render instances.
+# Set ARCFACE_DET_SIZE=640 if you need the old setting.
+ARCFACE_DET_SIZE = int(
+    os.environ.get("ARCFACE_DET_SIZE", "320")
+)
+
 
 # =============================================================================
 # GLOBAL MODELS
@@ -122,7 +128,9 @@ _arc_labels = None
 _cascade = None
 
 _lock = threading.Lock()
+_arc_load_lock = threading.Lock()
 _train_thread = None
+_model_loader_started = False
 _training_started_at = None
 
 _models_ready = {
@@ -318,6 +326,13 @@ def _load_gray_face(path):
 # =============================================================================
 
 def _get_arcface():
+    """
+    Lazily load InsightFace only when ArcFace is actually needed.
+
+    This is important on Render Free because loading InsightFace during
+    Gunicorn startup can consume a large amount of RAM before the API
+    is even ready. Only one thread is allowed to initialize the model.
+    """
     global _arc_app
 
     with _lock:
@@ -333,59 +348,43 @@ def _get_arcface():
             )
         )
 
-    print(
-        "[face_server] Loading InsightFace buffalo_s...",
-        flush=True
-    )
+    with _arc_load_lock:
+        # Another request may have finished loading while this request
+        # was waiting for the initialization lock.
+        with _lock:
+            if _arc_app is not None:
+                return _arc_app
 
-    model = FaceAnalysis(
-        name="buffalo_s",
-        providers=["CPUExecutionProvider"]
-    )
-
-    model.prepare(
-        ctx_id=-1,
-        det_size=(320, 320)
-    )
-
-    with _lock:
-        _arc_app = model
-        _models_ready["arcface"] = True
-
-    print(
-        "[face_server] ArcFace/InsightFace loaded [OK]",
-        flush=True
-    )
-
-    return model
-
-
-def _unload_arcface():
-    """Release the InsightFace runtime before memory-heavy training."""
-    global _arc_app
-
-    with _lock:
-        model = _arc_app
-        _arc_app = None
-
-    if model is not None:
-        try:
-            del model
-        except Exception:
-            pass
-
-    gc.collect()
-
-    with _lock:
-        _models_ready["arcface"] = bool(
-            os.path.exists(ARC_DB)
-        )
-        _models_ready["hybrid"] = bool(
-            _models_ready.get("lbph", False)
-            and os.path.exists(ARC_DB)
+        print(
+            "[face_server] Lazy-loading InsightFace buffalo_s...",
+            flush=True
         )
 
-    print("[face_server] ArcFace runtime released for training.", flush=True)
+        model = FaceAnalysis(
+            name="buffalo_s",
+            providers=["CPUExecutionProvider"]
+        )
+
+        model.prepare(
+            ctx_id=-1,
+            det_size=(ARCFACE_DET_SIZE, ARCFACE_DET_SIZE)
+        )
+
+        with _lock:
+            _arc_app = model
+            _models_ready["arcface"] = True
+            _models_ready["hybrid"] = bool(
+                _models_ready.get("lbph", False)
+                and _arc_embeddings is not None
+            )
+
+        print(
+            "[face_server] ArcFace/InsightFace loaded [OK] "
+            f"det_size={ARCFACE_DET_SIZE}",
+            flush=True
+        )
+
+        return model
 
 
 def _load_arcface_db():
@@ -428,8 +427,13 @@ def _load_arcface_db():
         with _lock:
             _arc_embeddings = embeddings
             _arc_labels = labels
-            _models_ready["arcface"] = True
-            _models_ready["hybrid"] = (
+            # The embedding database can be loaded without loading the
+            # heavy InsightFace runtime. ArcFace becomes ready only after
+            # _get_arcface() successfully initializes the model.
+            _models_ready["arcface"] = bool(
+                _arc_app is not None
+            )
+            _models_ready["hybrid"] = bool(
                 _models_ready.get("lbph", False)
                 and _models_ready["arcface"]
             )
@@ -463,53 +467,93 @@ def _load_arcface_db():
 # =============================================================================
 
 def _load_models():
-    """Load only lightweight models at process startup.
+    """Load only lightweight models during web-server startup.
 
-    ArcFace is intentionally lazy-loaded because Render's small instances can
-    run out of memory when the web worker and the training subprocess load
-    InsightFace at the same time.
+    LBPH and the ArcFace embedding database are cheap enough to load here.
+    The InsightFace neural network itself is deliberately lazy-loaded by
+    _get_arcface() on the first ArcFace recognition request.
     """
     global _lbph
     global _cascade
 
-    print("[face_server] Starting lightweight model loading...", flush=True)
+    print(
+        "[face_server] Starting lightweight model loading...",
+        flush=True
+    )
 
+    # Haar detector
     _cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        cv2.data.haarcascades
+        + "haarcascade_frontalface_default.xml"
     )
 
     if _cascade.empty():
-        print("[face_server] WARNING: Haar Cascade failed.", flush=True)
+        print(
+            "[face_server] WARNING: Haar Cascade failed.",
+            flush=True
+        )
     else:
-        print("[face_server] Haar Cascade loaded [OK]", flush=True)
+        print(
+            "[face_server] Haar Cascade loaded [OK]",
+            flush=True
+        )
 
-    if os.path.exists(TRAINER) and _opencv_face_available():
+    # LBPH
+    if (
+        os.path.exists(TRAINER)
+        and _opencv_face_available()
+    ):
         try:
-            recognizer = cv2.face.LBPHFaceRecognizer_create(
-                radius=1, neighbors=8, grid_x=8, grid_y=8
+            recognizer = (
+                cv2.face.LBPHFaceRecognizer_create(
+                    radius=1,
+                    neighbors=8,
+                    grid_x=8,
+                    grid_y=8
+                )
             )
+
             recognizer.read(TRAINER)
+
             with _lock:
                 _lbph = recognizer
                 _models_ready["lbph"] = True
-            print("[face_server] LBPH loaded [OK]", flush=True)
+
+            print(
+                "[face_server] LBPH loaded [OK]",
+                flush=True
+            )
+
         except Exception as e:
-            print(f"[face_server] LBPH load failed: {e}", flush=True)
+            print(
+                f"[face_server] LBPH load failed: {e}",
+                flush=True
+            )
             _set_ready("lbph", False)
     else:
-        print("[face_server] LBPH model not available yet.", flush=True)
-
-    db_ok = _load_arcface_db()
-    with _lock:
-        _models_ready["hybrid"] = bool(
-            _models_ready["lbph"] and db_ok
+        print(
+            "[face_server] LBPH model not available yet.",
+            flush=True
         )
-        # The ArcFace neural network is NOT loaded here.
+
+    # Load only the saved ArcFace embeddings here. Do NOT initialize
+    # InsightFace/buffalo_s during startup.
+    db_loaded = _load_arcface_db()
+
+    with _lock:
+        _models_ready["arcface"] = bool(
+            _arc_app is not None
+            and db_loaded
+        )
+        _models_ready["hybrid"] = bool(
+            _models_ready["lbph"]
+            and _models_ready["arcface"]
+        )
         _models_ready["loading"] = False
 
     print(
         "[face_server] Lightweight model loading completed. "
-        "ArcFace will load on first recognition.",
+        "ArcFace runtime will load on first use.",
         flush=True
     )
 
@@ -888,6 +932,12 @@ def _recognize_face(face_color, face_roi):
 def status():
     with _lock:
         models = dict(_models_ready)
+        arcface_runtime_loaded = _arc_app is not None
+        arcface_db_loaded = bool(
+            _arc_embeddings is not None
+            and _arc_labels is not None
+            and len(_arc_embeddings) > 0
+        )
 
     return jsonify({
         "ok": True,
@@ -897,6 +947,9 @@ def status():
             "ArcFace",
             "Hybrid ArcFace + LBPH"
         ],
+        "arcface_db_loaded": arcface_db_loaded,
+        "arcface_runtime_loaded": arcface_runtime_loaded,
+        "arcface_lazy_loading": True,
         "thresholds": {
             "arcface_similarity": ARCFACE_THRESHOLD,
             "lbph_confidence": LBPH_THRESHOLD,
@@ -1841,14 +1894,17 @@ def reload_models():
         loaded["lbph_error"] = "trainer.yml missing"
 
     # ArcFace
+    # Only reload the lightweight embedding database here. The heavy
+    # InsightFace runtime stays lazy-loaded until ArcFace is actually used.
     try:
-        _get_arcface()
-
-        loaded["arcface"] = (
-            _load_arcface_db()
+        db_ok = _load_arcface_db()
+        loaded["arcface_db"] = bool(db_ok)
+        loaded["arcface"] = bool(
+            db_ok
+            and _arc_app is not None
         )
-
     except Exception as e:
+        loaded["arcface_db"] = False
         loaded["arcface"] = False
         loaded["arcface_error"] = str(e)
 
@@ -1873,29 +1929,31 @@ def reload_models():
 # START SERVER
 # =============================================================================
 
-# Gunicorn imports this module instead of executing __main__.
-# Initialize only Haar/LBPH/database state at import time; ArcFace stays lazy.
-try:
-    _load_models()
-except Exception as _startup_error:
-    print(f"[face_server] Startup initialization warning: {_startup_error}", flush=True)
+def _start_model_loader():
+    """Start the lightweight loader once per Gunicorn worker."""
+    global _model_loader_started
 
-
-
-if __name__ == "__main__":
-    print(
-        "[face_server] Starting CICS "
-        "LBPH + ArcFace + Hybrid API...",
-        flush=True
-    )
+    with _lock:
+        if _model_loader_started:
+            return
+        _model_loader_started = True
 
     thread = threading.Thread(
         target=_load_models,
-        daemon=True
+        daemon=True,
+        name="model-loader"
     )
 
     thread.start()
 
+
+# Gunicorn imports `app` instead of executing this file as __main__.
+# Start the lightweight loader at import time so /status is initialized
+# correctly under Render + Gunicorn. ArcFace itself remains lazy-loaded.
+_start_model_loader()
+
+
+if __name__ == "__main__":
     port = int(
         os.environ.get(
             "PORT",
