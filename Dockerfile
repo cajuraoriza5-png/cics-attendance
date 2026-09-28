@@ -2,8 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Keep native dependencies small enough for a low-memory Render service.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# System dependencies required by OpenCV/InsightFace/ONNX Runtime
+RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
     g++ \
@@ -13,15 +13,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libopenblas-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Keep memory and CPU usage predictable on small Render instances.
+ENV OMP_NUM_THREADS=1
+ENV OPENBLAS_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV NUMEXPR_NUM_THREADS=1
+ENV ORT_INTRA_OP_NUM_THREADS=1
+ENV ORT_INTER_OP_NUM_THREADS=1
+ENV MPLCONFIGDIR=/tmp/matplotlib
+
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
-
-# InsightFace may pull a normal OpenCV wheel as a dependency. Reinstall the
-# contrib headless wheel last so cv2.face/LBPH is definitely available.
-RUN pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless || true \
-    && pip install --no-cache-dir opencv-contrib-python-headless==4.10.0.84
+RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY face_server.py .
 COPY train_all_models.py .
@@ -30,6 +34,4 @@ RUN mkdir -p faces faces_incoming /tmp/matplotlib
 
 EXPOSE 5001
 
-# One worker only. face_server.py lazy-loads ArcFace so the worker does not
-# load InsightFace until recognition actually needs it.
-CMD ["gunicorn", "face_server:app", "--bind", "0.0.0.0:5001", "--workers", "1", "--timeout", "300", "--preload"]
+CMD ["gunicorn", "face_server:app", "--bind", "0.0.0.0:5001", "--workers", "1", "--timeout", "300"]
