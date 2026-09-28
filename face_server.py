@@ -388,6 +388,34 @@ def _get_arcface():
         return model
 
 
+def _unload_arcface():
+    """Release the in-process InsightFace runtime before training.
+
+    Render Free has a small memory limit, so the Gunicorn worker must not
+    keep the ArcFace ONNX runtime alive while train_all_models.py runs.
+    ArcFace is recreated lazily when recognition is requested.
+    """
+    global _arc_app
+
+    old_model = None
+
+    with _arc_load_lock:
+        with _lock:
+            old_model = _arc_app
+            _arc_app = None
+            _models_ready["arcface"] = False
+            _models_ready["hybrid"] = False
+
+        if old_model is not None:
+            try:
+                del old_model
+            except Exception:
+                pass
+
+        # Encourage Python/ONNX Runtime to release objects immediately.
+        gc.collect()
+
+
 def _load_arcface_db():
     global _arc_embeddings
     global _arc_labels
@@ -1627,9 +1655,11 @@ def _reload_after_training():
         raise RuntimeError("ArcFace embedding database was not created.")
 
     with _lock:
-        _models_ready["hybrid"] = True
-        # ArcFace network remains unloaded until /recognize needs it.
-        _models_ready["arcface"] = True
+        # The ArcFace embedding database is ready, but the heavy InsightFace
+        # runtime remains lazy. It will be loaded by _get_arcface() on first
+        # ArcFace recognition request.
+        _models_ready["arcface"] = False
+        _models_ready["hybrid"] = False
 
 
 def _do_train():
