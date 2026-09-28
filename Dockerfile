@@ -13,14 +13,24 @@ RUN apt-get update && apt-get install -y \
     libopenblas-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Matplotlib configuration
+ENV MPLBACKEND=Agg
+ENV MPLCONFIGDIR=/app/.matplotlib
+
+# Create Matplotlib cache directory
+RUN mkdir -p /app/.matplotlib
+
 # Copy requirements
 COPY requirements.txt .
 
 # Upgrade pip
 RUN pip install --no-cache-dir --upgrade pip
 
-# Install all Python dependencies
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Build Matplotlib font cache during Docker build
+RUN python -c "import matplotlib; import matplotlib.font_manager"
 
 # Copy application
 COPY face_server.py .
@@ -31,4 +41,4 @@ RUN mkdir -p faces
 
 EXPOSE 5001
 
-CMD ["gunicorn", "face_server:app", "--bind", "0.0.0.0:5001", "--workers", "1", "--timeout", "120"]
+CMD ["gunicorn", "face_server:app", "--bind", "0.0.0.0:5001", "--workers", "1", "--timeout", "300"]
