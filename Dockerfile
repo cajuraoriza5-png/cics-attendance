@@ -63,9 +63,6 @@ RUN pip install --no-cache-dir \
     opencv-contrib-python-headless==4.10.0.84
 
 # Verify OpenCV has the face module
-RUN python -c "import cv2; print('OpenCV:', cv2.__version__); print('cv2.face:', hasattr(cv2, 'face')); assert hasattr(cv2, 'face'), 'ERROR: cv2.face is missing'"
-
-# Copy application
 COPY face_server.py .
 COPY train_all_models.py .
 
