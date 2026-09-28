@@ -32,14 +32,8 @@ Output:
 """
 
 import os
-import json
-import time
-import traceback
-import re
-import gc
-from collections import Counter
 
-# Keep ONNX/BLAS memory low on small Render instances.
+# Keep CPU/RAM usage predictable on Render Free (512 MB instances).
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -48,6 +42,13 @@ os.environ.setdefault("ORT_INTRA_OP_NUM_THREADS", "1")
 os.environ.setdefault("ORT_INTER_OP_NUM_THREADS", "1")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+
+import json
+import time
+import traceback
+import re
+import gc
+from collections import Counter
 
 import cv2
 import numpy as np
@@ -421,11 +422,14 @@ def get_arcface():
         flush=True
     )
 
+    # buffalo_sc is the lightweight InsightFace pack. It contains the
+    # SCRFD-500MF detector + ArcFace MobileFaceNet recognizer and omits
+    # the extra landmark/age models. This is much more appropriate for
+    # Render Free's 512-MB memory limit.
     model = FaceAnalysis(
-        name="buffalo_s",
-        providers=[
-            "CPUExecutionProvider"
-        ]
+        name="buffalo_sc",
+        allowed_modules=["detection", "recognition"],
+        providers=["CPUExecutionProvider"]
     )
 
     model.prepare(
@@ -614,13 +618,6 @@ def train_arcface(
         flush=True
     )
 
-    # Release ONNX/InsightFace memory before this process exits.
-    try:
-        del model
-    except Exception:
-        pass
-    gc.collect()
-
     return {
         "ok": True,
         "samples": int(
@@ -747,6 +744,10 @@ def main():
             files,
             arc_model
         )
+
+        # Release the heavy ArcFace runtime before finalization.
+        del arc_model
+        gc.collect()
 
         # ---------------------------------------------------------
         # Hybrid
