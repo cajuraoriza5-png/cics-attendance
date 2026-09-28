@@ -29,7 +29,18 @@ import subprocess
 import time
 import re
 import shutil
+import gc
 from collections import Counter
+
+# Keep CPU inference/training memory predictable on small Render instances.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("ORT_INTRA_OP_NUM_THREADS", "1")
+os.environ.setdefault("ORT_INTER_OP_NUM_THREADS", "1")
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 
 import numpy as np
 import cv2
@@ -334,7 +345,7 @@ def _get_arcface():
 
     model.prepare(
         ctx_id=-1,
-        det_size=(640, 640)
+        det_size=(320, 320)
     )
 
     with _lock:
@@ -347,6 +358,34 @@ def _get_arcface():
     )
 
     return model
+
+
+def _unload_arcface():
+    """Release the InsightFace runtime before memory-heavy training."""
+    global _arc_app
+
+    with _lock:
+        model = _arc_app
+        _arc_app = None
+
+    if model is not None:
+        try:
+            del model
+        except Exception:
+            pass
+
+    gc.collect()
+
+    with _lock:
+        _models_ready["arcface"] = bool(
+            os.path.exists(ARC_DB)
+        )
+        _models_ready["hybrid"] = bool(
+            _models_ready.get("lbph", False)
+            and os.path.exists(ARC_DB)
+        )
+
+    print("[face_server] ArcFace runtime released for training.", flush=True)
 
 
 def _load_arcface_db():
@@ -424,94 +463,53 @@ def _load_arcface_db():
 # =============================================================================
 
 def _load_models():
+    """Load only lightweight models at process startup.
+
+    ArcFace is intentionally lazy-loaded because Render's small instances can
+    run out of memory when the web worker and the training subprocess load
+    InsightFace at the same time.
+    """
     global _lbph
     global _cascade
 
-    print(
-        "[face_server] Starting model loading...",
-        flush=True
-    )
+    print("[face_server] Starting lightweight model loading...", flush=True)
 
-    # Haar detector
     _cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades
-        + "haarcascade_frontalface_default.xml"
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     )
 
     if _cascade.empty():
-        print(
-            "[face_server] WARNING: Haar Cascade failed.",
-            flush=True
-        )
+        print("[face_server] WARNING: Haar Cascade failed.", flush=True)
     else:
-        print(
-            "[face_server] Haar Cascade loaded [OK]",
-            flush=True
-        )
+        print("[face_server] Haar Cascade loaded [OK]", flush=True)
 
-    # LBPH
-    if (
-        os.path.exists(TRAINER)
-        and _opencv_face_available()
-    ):
+    if os.path.exists(TRAINER) and _opencv_face_available():
         try:
-            recognizer = (
-                cv2.face.LBPHFaceRecognizer_create(
-                    radius=1,
-                    neighbors=8,
-                    grid_x=8,
-                    grid_y=8
-                )
+            recognizer = cv2.face.LBPHFaceRecognizer_create(
+                radius=1, neighbors=8, grid_x=8, grid_y=8
             )
-
             recognizer.read(TRAINER)
-
             with _lock:
                 _lbph = recognizer
                 _models_ready["lbph"] = True
-
-            print(
-                "[face_server] LBPH loaded [OK]",
-                flush=True
-            )
-
+            print("[face_server] LBPH loaded [OK]", flush=True)
         except Exception as e:
-            print(
-                f"[face_server] LBPH load failed: {e}",
-                flush=True
-            )
-
+            print(f"[face_server] LBPH load failed: {e}", flush=True)
             _set_ready("lbph", False)
-
     else:
-        print(
-            "[face_server] LBPH model not available yet.",
-            flush=True
-        )
+        print("[face_server] LBPH model not available yet.", flush=True)
 
-    # ArcFace
-    try:
-        _get_arcface()
-        _load_arcface_db()
-
-    except Exception as e:
-        print(
-            f"[face_server] ArcFace startup load failed: {e}",
-            flush=True
-        )
-
-        _set_ready("arcface", False)
-
+    db_ok = _load_arcface_db()
     with _lock:
-        _models_ready["hybrid"] = (
-            _models_ready["lbph"]
-            and _models_ready["arcface"]
+        _models_ready["hybrid"] = bool(
+            _models_ready["lbph"] and db_ok
         )
-
+        # The ArcFace neural network is NOT loaded here.
         _models_ready["loading"] = False
 
     print(
-        "[face_server] Model loading completed.",
+        "[face_server] Lightweight model loading completed. "
+        "ArcFace will load on first recognition.",
         flush=True
     )
 
@@ -1518,79 +1516,66 @@ def _build_training_dataset():
 
 
 def _run_training_script():
-    """
-    Run train_all_models.py so LBPH and ArcFace embedding generation
-    are kept in one training module.
-    """
+    """Run training after releasing the parent ArcFace runtime."""
+    train_script = os.path.join(PROJECT, "train_all_models.py")
 
-    train_script = os.path.join(
-        PROJECT,
-        "train_all_models.py"
-    )
+    if not os.path.exists(train_script):
+        raise RuntimeError("train_all_models.py was not found.")
 
-    if not os.path.exists(
-        train_script
-    ):
-        raise RuntimeError(
-            "train_all_models.py was not found."
-        )
+    # Important for 512-MB Render instances: never keep InsightFace loaded in
+    # the Gunicorn worker while the training subprocess loads InsightFace.
+    _unload_arcface()
+
+    env = os.environ.copy()
+    env.update({
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+        "ORT_INTRA_OP_NUM_THREADS": "1",
+        "ORT_INTER_OP_NUM_THREADS": "1",
+        "MPLCONFIGDIR": "/tmp/matplotlib",
+    })
 
     process = subprocess.run(
-        [
-            sys.executable,
-            train_script
-        ],
+        [sys.executable, train_script],
         cwd=PROJECT,
-        env=os.environ.copy(),
-        text=True
+        env=env,
+        text=True,
     )
 
     if process.returncode != 0:
         raise RuntimeError(
-            f"train_all_models.py exited with code "
-            f"{process.returncode}"
+            f"train_all_models.py exited with code {process.returncode}"
         )
 
 
 def _reload_after_training():
+    """Reload small models/artifacts only; keep ArcFace lazy."""
     global _lbph
 
-    if not os.path.exists(
-        TRAINER
-    ):
-        raise RuntimeError(
-            "LBPH trainer.yml was not created."
-        )
+    if not os.path.exists(TRAINER):
+        raise RuntimeError("LBPH trainer.yml was not created.")
 
     if not _opencv_face_available():
-        raise RuntimeError(
-            "OpenCV contrib face module is unavailable."
-        )
+        raise RuntimeError("OpenCV contrib face module is unavailable.")
 
-    recognizer = (
-        cv2.face.LBPHFaceRecognizer_create(
-            radius=1,
-            neighbors=8,
-            grid_x=8,
-            grid_y=8
-        )
+    recognizer = cv2.face.LBPHFaceRecognizer_create(
+        radius=1, neighbors=8, grid_x=8, grid_y=8
     )
-
-    recognizer.read(
-        TRAINER
-    )
+    recognizer.read(TRAINER)
 
     with _lock:
         _lbph = recognizer
         _models_ready["lbph"] = True
 
     if not _load_arcface_db():
-        raise RuntimeError(
-            "ArcFace embedding database was not created."
-        )
+        raise RuntimeError("ArcFace embedding database was not created.")
 
     with _lock:
         _models_ready["hybrid"] = True
+        # ArcFace network remains unloaded until /recognize needs it.
+        _models_ready["arcface"] = True
 
 
 def _do_train():
@@ -1648,6 +1633,9 @@ def _do_train():
                 "dropped_students": dropped
             }
         )
+
+        # Release any ArcFace ONNX runtime before starting the training subprocess.
+        _unload_arcface()
 
         # Invalidate old in-memory models.
         with _lock:
@@ -1885,30 +1873,28 @@ def reload_models():
 # START SERVER
 # =============================================================================
 
-# =============================================================================
-# START MODEL LOADER
-# =============================================================================
-
-print(
-    "[face_server] Starting CICS "
-    "LBPH + ArcFace + Hybrid API...",
-    flush=True
-)
-
-thread = threading.Thread(
-    target=_load_models,
-    daemon=True,
-    name="model-loader"
-)
-
-thread.start()
+# Gunicorn imports this module instead of executing __main__.
+# Initialize only Haar/LBPH/database state at import time; ArcFace stays lazy.
+try:
+    _load_models()
+except Exception as _startup_error:
+    print(f"[face_server] Startup initialization warning: {_startup_error}", flush=True)
 
 
-# =============================================================================
-# LOCAL DEVELOPMENT SERVER
-# =============================================================================
 
 if __name__ == "__main__":
+    print(
+        "[face_server] Starting CICS "
+        "LBPH + ArcFace + Hybrid API...",
+        flush=True
+    )
+
+    thread = threading.Thread(
+        target=_load_models,
+        daemon=True
+    )
+
+    thread.start()
 
     port = int(
         os.environ.get(
