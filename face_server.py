@@ -356,12 +356,13 @@ def _get_arcface():
                 return _arc_app
 
         print(
-            "[face_server] Lazy-loading InsightFace buffalo_s...",
+            "[face_server] Lazy-loading InsightFace buffalo_sc (lightweight ArcFace)...",
             flush=True
         )
 
         model = FaceAnalysis(
-            name="buffalo_s",
+            name="buffalo_sc",
+            allowed_modules=["detection", "recognition"],
             providers=["CPUExecutionProvider"]
         )
 
@@ -537,7 +538,7 @@ def _load_models():
         )
 
     # Load only the saved ArcFace embeddings here. Do NOT initialize
-    # InsightFace/buffalo_s during startup.
+    # InsightFace/buffalo_sc during startup.
     db_loaded = _load_arcface_db()
 
     with _lock:
