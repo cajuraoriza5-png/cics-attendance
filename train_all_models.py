@@ -34,6 +34,7 @@ Output:
 import zipfile
 import urllib.request
 import shutil
+import gc
 import os
 import json
 import time
