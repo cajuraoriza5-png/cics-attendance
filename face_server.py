@@ -121,6 +121,37 @@ _models_ready = {
     "loading": True
 }
 
+# ---------------------------------------------------------------------------
+# IMPORTANT FOR GUNICORN / RENDER
+# ---------------------------------------------------------------------------
+# Gunicorn imports this module instead of executing the __main__ block.
+# Therefore the Haar face detector must be initialized at module load time,
+# and model loading must be started from a background thread after import.
+# ---------------------------------------------------------------------------
+try:
+    _cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades +
+        "haarcascade_frontalface_default.xml"
+    )
+
+    if _cascade.empty():
+        print(
+            "[face_server] ERROR: Haar Cascade could not be initialized.",
+            flush=True
+        )
+        _cascade = None
+    else:
+        print(
+            "[face_server] Haar Cascade initialized [OK]",
+            flush=True
+        )
+except Exception as _detector_error:
+    print(
+        f"[face_server] Haar Cascade initialization failed: {_detector_error}",
+        flush=True
+    )
+    _cascade = None
+
 
 # =============================================================================
 # STATUS HELPERS
@@ -1809,6 +1840,35 @@ def reload_models():
         "loaded": loaded,
         "models": _models_ready
     })
+
+
+# =============================================================================
+# GUNICORN / RENDER STARTUP
+# =============================================================================
+# Render uses Gunicorn:
+#   gunicorn face_server:app ...
+#
+# In that mode Python does NOT execute the __main__ section below.
+# Start model loading when the module is imported so /recognize never sees
+# an uninitialized face detector.
+_startup_thread = None
+
+try:
+    _startup_thread = threading.Thread(
+        target=_load_models,
+        daemon=True,
+        name="face-model-loader"
+    )
+    _startup_thread.start()
+    print(
+        "[face_server] Background model loading started.",
+        flush=True
+    )
+except Exception as _startup_error:
+    print(
+        f"[face_server] Background model loading could not start: {_startup_error}",
+        flush=True
+    )
 
 
 # =============================================================================
