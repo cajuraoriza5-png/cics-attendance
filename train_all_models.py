@@ -33,6 +33,7 @@ Output:
 """
 import zipfile
 import urllib.request
+import shutil
 import os
 import json
 import time
