@@ -32,32 +32,21 @@ Output:
 """
 
 import os
-
-# Keep CPU/RAM usage predictable on Render Free (512 MB instances).
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-os.environ.setdefault("ORT_INTRA_OP_NUM_THREADS", "1")
-os.environ.setdefault("ORT_INTER_OP_NUM_THREADS", "1")
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
-os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
-
 import json
 import time
 import traceback
 import re
-import gc
+import zipfile
+import urllib.request
+import shutil
 from collections import Counter
 
 import cv2
 import numpy as np
 
-try:
-    from insightface.app import FaceAnalysis
-except Exception as e:
-    FaceAnalysis = None
-    INSIGHTFACE_IMPORT_ERROR = str(e)
+# InsightFace is imported lazily. Only the ArcFace recognition ONNX model
+# (w600k_mbf.onnx) is loaded; FaceAnalysis is intentionally not used.
+INSIGHTFACE_IMPORT_ERROR = ""
 
 
 # =============================================================================
@@ -407,42 +396,184 @@ def train_lbph(files):
 # ARCFACE
 # =============================================================================
 
-def get_arcface():
-    if FaceAnalysis is None:
-        raise RuntimeError(
-            "InsightFace is unavailable: "
-            + globals().get(
-                "INSIGHTFACE_IMPORT_ERROR",
-                "unknown import error"
+
+def find_arcface_model():
+    home = os.path.expanduser("~")
+    candidates = [
+        os.environ.get("ARCFACE_MODEL_PATH", "").strip(),
+        os.path.join(home, ".insightface", "models", "buffalo_s", "w600k_mbf.onnx"),
+        os.path.join(PROJECT, "models", "w600k_mbf.onnx"),
+    ]
+
+    for path in candidates:
+        if path and os.path.isfile(path) and os.path.getsize(path) > 1024:
+            return path
+
+    zip_candidates = [
+        os.path.join(home, ".insightface", "models", "buffalo_s.zip"),
+        os.path.join(PROJECT, "models", "buffalo_s.zip"),
+    ]
+
+    for zip_path in zip_candidates:
+        if not os.path.isfile(zip_path):
+            continue
+
+        target_dir = os.path.join(os.path.dirname(zip_path), "buffalo_s")
+        target = os.path.join(target_dir, "w600k_mbf.onnx")
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                member = next(
+                    (
+                        n for n in zf.namelist()
+                        if n.replace("\\", "/").endswith("w600k_mbf.onnx")
+                    ),
+                    None
+                )
+                if member:
+                    with zf.open(member) as src, open(target, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    if os.path.isfile(target) and os.path.getsize(target) > 1024:
+                        return target
+        except Exception as e:
+            print(f"[train] Lightweight ArcFace extraction failed: {e}", flush=True)
+
+    return None
+
+
+def download_arcface_model():
+    home = os.path.expanduser("~")
+    root = os.path.join(home, ".insightface", "models")
+    os.makedirs(root, exist_ok=True)
+
+    zip_path = os.path.join(root, "buffalo_s.zip")
+    target_dir = os.path.join(root, "buffalo_s")
+    target = os.path.join(target_dir, "w600k_mbf.onnx")
+
+    if os.path.isfile(target) and os.path.getsize(target) > 1024:
+        return target
+
+    url = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip"
+    tmp_zip = zip_path + ".part"
+
+    print("[train] Downloading buffalo_s pack for lightweight ArcFace...", flush=True)
+
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response, open(tmp_zip, "wb") as dst:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+
+        os.replace(tmp_zip, zip_path)
+
+        os.makedirs(target_dir, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            member = next(
+                (
+                    n for n in zf.namelist()
+                    if n.replace("\\", "/").endswith("w600k_mbf.onnx")
+                ),
+                None
             )
+            if not member:
+                raise RuntimeError("w600k_mbf.onnx not found in buffalo_s.zip")
+
+            with zf.open(member) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+        return target
+
+    except Exception:
+        try:
+            if os.path.exists(tmp_zip):
+                os.remove(tmp_zip)
+        except Exception:
+            pass
+        raise
+
+
+def get_arcface():
+    try:
+        from insightface import model_zoo
+    except Exception as e:
+        raise RuntimeError(
+            "InsightFace model_zoo is unavailable: " + str(e)
         )
 
+    model_path = find_arcface_model()
+    if model_path is None:
+        model_path = download_arcface_model()
+
     print(
-        "[train] Loading InsightFace buffalo_s...",
+        f"[train] Loading lightweight ArcFace recognition model: {model_path}",
         flush=True
     )
 
-    # buffalo_sc is the lightweight InsightFace pack. It contains the
-    # SCRFD-500MF detector + ArcFace MobileFaceNet recognizer and omits
-    # the extra landmark/age models. This is much more appropriate for
-    # Render Free's 512-MB memory limit.
-    model = FaceAnalysis(
-        name="buffalo_sc",
-        allowed_modules=["detection", "recognition"],
+    model = model_zoo.get_model(
+        model_path,
         providers=["CPUExecutionProvider"]
     )
 
-    model.prepare(
-        ctx_id=-1,
-        det_size=(320, 320)
-    )
+    model.prepare(ctx_id=-1)
 
     print(
-        "[train] InsightFace loaded [OK]",
+        "[train] Lightweight ArcFace recognition model loaded [OK]",
         flush=True
     )
 
     return model
+
+
+def estimated_five_landmarks(width, height):
+    w = float(width)
+    h = float(height)
+
+    return np.array([
+        [0.32 * w, 0.38 * h],
+        [0.68 * w, 0.38 * h],
+        [0.50 * w, 0.56 * h],
+        [0.38 * w, 0.72 * h],
+        [0.62 * w, 0.72 * h],
+    ], dtype=np.float32)
+
+
+def align_face_for_arcface(face_color):
+    if face_color is None or face_color.size == 0:
+        return None
+
+    h, w = face_color.shape[:2]
+    if w < 20 or h < 20:
+        return None
+
+    src = estimated_five_landmarks(w, h)
+
+    dst = np.array([
+        [38.2946, 51.6963],
+        [73.5318, 51.5014],
+        [56.0252, 71.7366],
+        [41.5493, 92.3655],
+        [70.7299, 92.2041],
+    ], dtype=np.float32)
+
+    M, _ = cv2.estimateAffinePartial2D(
+        src, dst, method=cv2.LMEDS
+    )
+
+    if M is None:
+        return cv2.resize(
+            face_color,
+            (112, 112),
+            interpolation=cv2.INTER_AREA
+        )
+
+    return cv2.warpAffine(
+        face_color,
+        M,
+        (112, 112),
+        borderMode=cv2.BORDER_REPLICATE
+    )
 
 
 def normalize_embedding(embedding):
@@ -486,6 +617,11 @@ def train_arcface(
 
     total = len(files)
 
+    cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades
+        + "haarcascade_frontalface_default.xml"
+    )
+
     for index, (
         path,
         student_id,
@@ -506,33 +642,58 @@ def train_arcface(
                 )
                 continue
 
-            detected_faces = (
-                model.get(image)
+            # Haar is used for lightweight face detection. The same
+            # deterministic ArcFace alignment used by the server is applied
+            # here so training and recognition use identical preprocessing.
+            gray = cv2.equalizeHist(
+                cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             )
 
-            if not detected_faces:
-                failed.append(
-                    filename
+            boxes = cascade.detectMultiScale(
+                gray,
+                1.1,
+                5,
+                minSize=(40, 40)
+            )
+
+            if len(boxes) == 0:
+                boxes = cascade.detectMultiScale(
+                    gray,
+                    1.05,
+                    3,
+                    minSize=(30, 30)
                 )
+
+            if len(boxes) == 0:
+                failed.append(filename)
                 continue
 
-            # Use the strongest detected face.
-            face = max(
-                detected_faces,
-                key=lambda item: float(
-                    getattr(
-                        item,
-                        "det_score",
-                        0.0
-                    ) or 0.0
-                )
+            x, y, w, h = max(
+                boxes,
+                key=lambda r: r[2] * r[3]
             )
 
-            embedding = (
-                normalize_embedding(
-                    face.embedding
-                )
-            )
+            pad_x = int(w * 0.12)
+            pad_y = int(h * 0.12)
+
+            x1 = max(0, x - pad_x)
+            y1 = max(0, y - pad_y)
+            x2 = min(image.shape[1], x + w + pad_x)
+            y2 = min(image.shape[0], y + h + pad_y)
+
+            face_crop = image[y1:y2, x1:x2]
+            aligned = align_face_for_arcface(face_crop)
+
+            if aligned is None:
+                failed.append(filename)
+                continue
+
+            features = model.get_feat([aligned])
+            if features is None or len(features) == 0:
+                failed.append(filename)
+                continue
+
+            embedding = normalize_embedding(features[0])
 
             if embedding is None:
                 failed.append(
@@ -744,10 +905,6 @@ def main():
             files,
             arc_model
         )
-
-        # Release the heavy ArcFace runtime before finalization.
-        del arc_model
-        gc.collect()
 
         # ---------------------------------------------------------
         # Hybrid
