@@ -10,7 +10,7 @@
  *   1. PHP renders the scanner UI (camera + stats + event info).
  *   2. JavaScript captures webcam frames and sends them as Base64 to
  *      face_server.py (Flask API on port 5001) via fetch().
- *   3. Flask runs LBPH + Fisherfaces and returns separate LBPH, Fisherfaces, and Hybrid results.
+ *   3. Flask runs LBPH + ArcFace and returns separate LBPH, ArcFace, and Hybrid results.
  *   4. JS posts the result to scan_attendance.php to record attendance.
  *
  * AJAX ENDPOINTS (called by JavaScript on the same page):
@@ -74,7 +74,7 @@ if(isset($_GET['server_status'])){
     curl_close($ch);
     if($code===200 && $r) echo $r;
     else echo json_encode(['ok'=>false,'loading'=>true,'offline'=>true,
-                           'models'=>['lbph'=>false,'fisherfaces'=>false,'loading'=>true]]);
+                           'models'=>['lbph'=>false,'arcface'=>false,'loading'=>true]]);
     exit;
 }
 
@@ -215,6 +215,45 @@ html,body{
 }
 .panel-card h2{font-size:14px;color:#FFD700;margin-bottom:12px;}
 
+
+/* Live recognition comparison */
+.recognition-panel{
+    transition:all .25s ease;
+    border-color:rgba(255,215,0,.2);
+}
+.recognition-panel.recognized{
+    border-color:#00ff88;
+    background:linear-gradient(135deg,rgba(0,255,136,.14),rgba(40,167,69,.08));
+    box-shadow:0 0 18px rgba(0,255,136,.18);
+}
+.recognition-main{
+    font-size:15px;font-weight:800;color:#FFD700;
+    margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.recognition-panel.recognized .recognition-main{color:#00ff88;}
+.algo-grid{display:grid;grid-template-columns:1fr;gap:7px;}
+.algo-card{
+    position:relative;background:rgba(0,0,0,.28);
+    border:1px solid rgba(255,255,255,.10);border-radius:10px;
+    padding:8px 10px;transition:all .2s ease;
+}
+.algo-card.highest{
+    border-color:#00ff88;
+    background:rgba(0,255,136,.14);
+    box-shadow:0 0 12px rgba(0,255,136,.18);
+}
+.algo-top{display:flex;justify-content:space-between;align-items:center;gap:8px;}
+.algo-name{font-size:11px;font-weight:800;letter-spacing:.3px;}
+.algo-conf{font-size:16px;font-weight:900;color:#fff;}
+.algo-card.highest .algo-conf{color:#00ff88;}
+.algo-id{font-size:10px;color:rgba(255,255,255,.55);margin-top:2px;}
+.algo-bar{height:5px;background:rgba(255,255,255,.08);border-radius:8px;margin-top:6px;overflow:hidden;}
+.algo-fill{height:100%;width:0;background:#FFD700;border-radius:8px;transition:width .25s ease;}
+.algo-card.highest .algo-fill{background:#00ff88;}
+.algo-state{font-size:9px;font-weight:800;color:rgba(255,255,255,.45);margin-top:4px;text-transform:uppercase;}
+.algo-card.highest .algo-state{color:#00ff88;}
+.recognition-note{font-size:10px;color:rgba(255,255,255,.45);margin-top:8px;line-height:1.35;}
+
 /* Stats */
 .stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
 .stat{border-radius:10px;padding:10px;text-align:center;}
@@ -353,6 +392,31 @@ $showAfternoon  = ($scanEventType !== 'Morning Only');
             </div>
         </div>
     </div>
+    <div class="panel-card recognition-panel" id="recognitionPanel">
+        <h2>🎯 Live Recognition</h2>
+        <div class="recognition-main" id="recognitionMain">Waiting for a face…</div>
+        <div class="algo-grid">
+            <div class="algo-card" id="algoLbph">
+                <div class="algo-top"><span class="algo-name">LBPH</span><span class="algo-conf" id="lbphConfView">0.0%</span></div>
+                <div class="algo-id" id="lbphIdView">No result</div>
+                <div class="algo-bar"><div class="algo-fill" id="lbphBar"></div></div>
+                <div class="algo-state" id="lbphStateView">Waiting</div>
+            </div>
+            <div class="algo-card" id="algoArcface">
+                <div class="algo-top"><span class="algo-name">ArcFace</span><span class="algo-conf" id="arcfaceConfView">0.0%</span></div>
+                <div class="algo-id" id="arcfaceIdView">No result</div>
+                <div class="algo-bar"><div class="algo-fill" id="arcfaceBar"></div></div>
+                <div class="algo-state" id="arcfaceStateView">Waiting</div>
+            </div>
+            <div class="algo-card" id="algoHybrid">
+                <div class="algo-top"><span class="algo-name">Hybrid</span><span class="algo-conf" id="hybridConfView">0.0%</span></div>
+                <div class="algo-id" id="hybridIdView">No result</div>
+                <div class="algo-bar"><div class="algo-fill" id="hybridBar"></div></div>
+                <div class="algo-state" id="hybridStateView">Waiting</div>
+            </div>
+        </div>
+        <div class="recognition-note">The highest-confidence algorithm is highlighted in green. Confidence is displayed for comparison only; it does not block recognition.</div>
+    </div>
     <div class="scans-panel">
         <h2>🕐 Recent Scans</h2>
         <div class="scans-list" id="scansList">
@@ -372,6 +436,22 @@ const scansList  = document.getElementById('scansList');
 const resultBox  = document.getElementById('resultBox');
 const resultName = document.getElementById('resultName');
 const resultStatus=document.getElementById('resultStatus');
+const recognitionPanel = document.getElementById('recognitionPanel');
+const recognitionMain  = document.getElementById('recognitionMain');
+const algoViews = {
+    lbph: {
+        card: document.getElementById('algoLbph'), conf: document.getElementById('lbphConfView'),
+        id: document.getElementById('lbphIdView'), bar: document.getElementById('lbphBar'), state: document.getElementById('lbphStateView')
+    },
+    arcface: {
+        card: document.getElementById('algoArcface'), conf: document.getElementById('arcfaceConfView'),
+        id: document.getElementById('arcfaceIdView'), bar: document.getElementById('arcfaceBar'), state: document.getElementById('arcfaceStateView')
+    },
+    hybrid: {
+        card: document.getElementById('algoHybrid'), conf: document.getElementById('hybridConfView'),
+        id: document.getElementById('hybridIdView'), bar: document.getElementById('hybridBar'), state: document.getElementById('hybridStateView')
+    }
+};
 
 // ── Timing data (moved here so it's available before loadAlreadyScanned) ──
 const _timing = <?php echo $timingJson; ?>;
@@ -436,14 +516,14 @@ async function pollServerReady(){
     }
 
     const lbph        = d.models?.lbph === true;
-    const fisherfaces = d.models?.fisherfaces === true;
+    const arcface = d.models?.arcface === true;
     const loading     = d.models?.loading !== false;
 
     if(loading && !lbph){
         scanOverlay.textContent = '⚙️ Step 2/4: Loading Haar Cascade & LBPH model…';
-    } else if(loading && lbph && !fisherfaces){
-        scanOverlay.textContent = '⚙️ Step 3/4: Loading Fisherfaces model…';
-    } else if(!loading && lbph && fisherfaces){
+    } else if(loading && lbph && !arcface){
+        scanOverlay.textContent = '⚙️ Step 3/4: Loading ArcFace model…';
+    } else if(!loading && lbph && arcface){
         // ✅ Both current Render models are ready.
         clearInterval(_serverPollTmr);
         _serverPollTmr = null;
@@ -452,20 +532,20 @@ async function pollServerReady(){
         await startCamera();
         beginScanning(); // auto-start if camera already loaded
         return;
-    } else if(!loading && (!lbph || !fisherfaces)){
+    } else if(!loading && (!lbph || !arcface)){
         // Server loaded but one or both required models failed.
         clearInterval(_serverPollTmr);
         _serverPollTmr = null;
 
-        if(!lbph && !fisherfaces){
+        if(!lbph && !arcface){
             scanOverlay.textContent =
-                '⚠️ LBPH and Fisherfaces failed to load. Please train models first.';
+                '⚠️ LBPH and ArcFace failed to load. Please train models first.';
         } else if(!lbph){
             scanOverlay.textContent =
                 '⚠️ LBPH model failed to load. Please train models first.';
         } else {
             scanOverlay.textContent =
-                '⚠️ Fisherfaces model failed to load. Please train models first.';
+                '⚠️ ArcFace model failed to load. Please train models first.';
         }
         return;
     }
@@ -562,12 +642,12 @@ function captureFrame(){
 }
 
 // ── Draw bounding box ─────────────────────────────────────────────────────
-function drawBbox(bbox, matched){
+function drawBbox(bbox, recognized){
     if(!ctx) return;
     ctx.clearRect(0, 0, bboxCanvas.width, bboxCanvas.height);
     if(!bbox) return;
 
-    const color = matched ? '#00ff88' : '#FFD700';
+    const color = recognized ? '#00ff88' : '#FFD700';
     const mx    = bboxCanvas.width - bbox.x - bbox.w;  // mirror
 
     ctx.save();
@@ -613,15 +693,140 @@ function startFaceDetectionLoop(){
     tick();
 }
 
+// ── Live algorithm comparison ────────────────────────────────────────────
+function resetRecognitionPanel(){
+    recognitionPanel.classList.remove('recognized');
+    recognitionMain.textContent = 'Waiting for a face…';
+    Object.values(algoViews).forEach(v=>{
+        v.card.classList.remove('highest');
+        v.conf.textContent = '0.0%';
+        v.id.textContent = 'No result';
+        v.bar.style.width = '0%';
+        v.state.textContent = 'Waiting';
+    });
+}
+
+function updateRecognitionPanel(results){
+    const lbph = results.lbph || null;
+    const arcface = results.arcface || null;
+    const hybrid = results.hybrid || null;
+
+    const rows = {lbph, arcface, hybrid};
+    const ids = {};
+    const confidences = {};
+
+    // Show every algorithm result. No frontend confidence threshold is used.
+    for(const [key, r] of Object.entries(rows)){
+        const conf = Number(r?.confidence || 0);
+        const id = Number(r?.id || -1);
+        const valid = id > 0 && Number.isFinite(conf);
+        const view = algoViews[key];
+
+        view.card.classList.remove('highest');
+        view.conf.textContent = `${conf.toFixed(1)}%`;
+        view.id.textContent = valid ? `Student ID: ${id}` : (r?.reason || r?.error || 'No identity result');
+        view.bar.style.width = `${Math.max(0, Math.min(100, conf))}%`;
+        view.state.textContent = valid ? (r?.matched ? 'Model match' : 'Candidate') : 'No result';
+
+        if(valid){
+            ids[key] = id;
+            confidences[key] = conf;
+        }
+    }
+
+    const sameStudent =
+        ids.lbph &&
+        ids.arcface &&
+        ids.lbph === ids.arcface &&
+        ids.hybrid === ids.lbph;
+
+    // The three algorithms must agree on the SAME student.
+    if(!sameStudent){
+        recognitionPanel.classList.remove('recognized');
+
+        const idText = [
+            ids.lbph ? `LBPH #${ids.lbph}` : 'LBPH —',
+            ids.arcface ? `ArcFace #${ids.arcface}` : 'ArcFace —',
+            ids.hybrid ? `Hybrid #${ids.hybrid}` : 'Hybrid —'
+        ].join(' · ');
+
+        recognitionMain.textContent = `⚠ No consensus · ${idText}`;
+        return null;
+    }
+
+    // Strict consensus: Hybrid is the final result and must be the highest score.
+    const hybridConf = confidences.hybrid || 0;
+    const lbphConf = confidences.lbph || 0;
+    const arcfaceConf = confidences.arcface || 0;
+    const hybridIsHighest = hybridConf >= lbphConf && hybridConf >= arcfaceConf;
+
+    if(!hybridIsHighest){
+        recognitionPanel.classList.remove('recognized');
+        recognitionMain.textContent = '⚠ Consensus found, but Hybrid fusion is not highest';
+        return null;
+    }
+
+    // Highlight ONLY Hybrid because the adviser requires Hybrid to be highest.
+    algoViews.hybrid.card.classList.add('highest');
+    recognitionPanel.classList.add('recognized');
+
+    const level = hybridConf >= 80 ? 'HIGH' : hybridConf >= 50 ? 'MEDIUM' : 'LOW';
+    recognitionMain.textContent =
+        `✓ All 3 agree · Student #${ids.hybrid} · Hybrid highest · ${hybridConf.toFixed(1)}% (${level})`;
+
+    return {
+        id: ids.hybrid,
+        algorithm: 'hybrid',
+        confidence: hybridConf,
+        name: hybrid?.name || ('ID:' + ids.hybrid),
+        consensus: true
+    };
+}
+
+
 // ── Consensus & attendance ────────────────────────────────────────────────
 async function recordAttendance(studentId){
     try {
         const fd = new FormData();
-        fd.append('student_id', studentId);
-        const res  = await fetch('scan_attendance.php', {method:'POST', body:fd});
-        return await res.json();
+        fd.append('student_id', String(studentId));
+
+        const res = await fetch('scan_attendance.php?t=' + Date.now(), {
+            method: 'POST',
+            body: fd,
+            cache: 'no-store',
+            credentials: 'same-origin'
+        });
+
+        const raw = await res.text();
+        let data = null;
+
+        try {
+            data = JSON.parse(raw);
+        } catch(parseError) {
+            return {
+                success: false,
+                message: 'Attendance server returned an invalid response.',
+                details: raw.slice(0, 250),
+                http_status: res.status
+            };
+        }
+
+        if(!res.ok){
+            return {
+                success: false,
+                message: data.message || ('Attendance request failed (HTTP ' + res.status + ').'),
+                details: data.details || '',
+                http_status: res.status
+            };
+        }
+
+        return data;
     } catch(e){
-        return {success:false, message:'Network error'};
+        return {
+            success: false,
+            message: 'Could not connect to the attendance server.',
+            details: e && e.message ? e.message : 'Unknown browser/network error'
+        };
     }
 }
 
@@ -672,10 +877,31 @@ async function doScan(){
 
     let data;
     try {
-        const res = await fetch('face_recognize_api_updated.php', {method:'POST', body:fd});
-        data = await res.json();
+        const res = await fetch('face_recognize_api.php', {
+            method:'POST',
+            body:fd,
+            cache:'no-store'
+        });
+
+        const raw = await res.text();
+
+        if(!res.ok){
+            throw new Error(
+                'HTTP ' + res.status + ': ' + raw.slice(0, 180)
+            );
+        }
+
+        try {
+            data = JSON.parse(raw);
+        } catch(parseError) {
+            throw new Error(
+                'Invalid JSON from face_recognize_api.php: ' +
+                raw.slice(0, 180)
+            );
+        }
     } catch(e){
-        scanOverlay.textContent = '⚠️ API error';
+        scanOverlay.textContent =
+            '⚠️ API error: ' + (e.message || 'Unknown error');
         scanInFlight = false;
         return;
     } finally {
@@ -699,65 +925,52 @@ async function doScan(){
         return;
     }
 
-    // ── Recognition: LBPH + Fisherfaces + Hybrid ─────────────────────────────
-    // The Python server returns three separate results: lbph, fisherfaces, hybrid.
-    // Hybrid is the final attendance decision.
+    // ── Recognition: strict 3-algorithm consensus ─────────────────────────
+    // LBPH, ArcFace and Hybrid must all identify the SAME student.
+    // Hybrid is the final result and must have the highest confidence.
+    const lbph   = data.lbph || null;
+    const arcface = data.arcface || null;
+    const hybrid = data.hybrid || null;
 
-    let consensusId = null, consensusName = null;
+    const winner = updateRecognitionPanel({lbph, arcface, hybrid});
+    const recognized = !!winner;
 
-    const lbph        = data.lbph || null;
-    const fisherfaces = data.fisherfaces || null;
-    const hybrid      = data.hybrid || null;
-
-    const FRONTEND_THRESHOLD = 65;
-
-    if(
-        hybrid &&
-        !hybrid.error &&
-        hybrid.matched === true &&
-        Number(hybrid.id) > 0 &&
-        Number(hybrid.confidence || 0) >= FRONTEND_THRESHOLD
-    ){
-        consensusId   = Number(hybrid.id);
-        consensusName = hybrid.name || ('ID:' + hybrid.id);
-    }
+    // Green bounding box only after all three algorithms agree.
+    drawBbox(data.bbox, recognized);
 
     const lbphConf = Number(lbph?.confidence || 0);
-    const fisherConf = Number(fisherfaces?.confidence || 0);
+    const arcfaceConf = Number(arcface?.confidence || 0);
     const hybridConf = Number(hybrid?.confidence || 0);
 
-    const lbphMatched = lbph?.matched === true;
-    const fisherMatched = fisherfaces?.matched === true;
-    const hybridMatched = hybrid?.matched === true;
-
-    let algoInfo =
+    const algoInfo =
         `LBPH: ${lbphConf.toFixed(1)}%` +
-        ` | Fisherfaces: ${fisherConf.toFixed(1)}%` +
+        ` | ArcFace: ${arcfaceConf.toFixed(1)}%` +
         ` | Hybrid: ${hybridConf.toFixed(1)}%`;
 
-    if(lbphMatched && fisherMatched){
-        if(Number(lbph?.id) === Number(fisherfaces?.id)){
-            algoInfo += ' | Both agree';
-        } else {
-            algoInfo += ' | Disagreement';
-        }
-    } else if(lbphMatched){
-        algoInfo += ' | LBPH matched';
-    } else if(fisherMatched){
-        algoInfo += ' | Fisherfaces matched';
-    }
+    if(!winner){
+        const lbphId = Number(lbph?.id || -1);
+        const arcId = Number(arcface?.id || -1);
+        const hybridId = Number(hybrid?.id || -1);
 
-    if(!consensusId){
         scanOverlay.textContent =
-            `❓ Face detected – ${algoInfo} (need Hybrid ≥${FRONTEND_THRESHOLD}%)`;
-        resultBox.className='result-inline fail';
-        resultName.textContent = 'Not recognized';
-        resultStatus.textContent = hybrid?.error
-            ? hybrid.error
-            : `${algoInfo} – Hybrid result did not meet the ${FRONTEND_THRESHOLD}% threshold`;
+            `🟡 Face detected – waiting for 3-algorithm agreement`;
+        resultBox.className='result-inline';
+        resultName.textContent = 'No consensus';
+        resultStatus.textContent =
+            `${algoInfo} · IDs: LBPH ${lbphId > 0 ? lbphId : '—'} | ArcFace ${arcId > 0 ? arcId : '—'} | Hybrid ${hybridId > 0 ? hybridId : '—'}`;
         scanInFlight = false;
         return;
     }
+
+    const consensusId = winner.id;
+    const consensusName = winner.name;
+
+    scanOverlay.textContent =
+        `🟢 Recognized – all 3 agree · Hybrid ${winner.confidence.toFixed(1)}% highest`;
+    resultBox.className='result-inline success';
+    resultName.textContent = consensusName;
+    resultStatus.textContent =
+        `3 algorithms agree · Hybrid highest · ${algoInfo}`;
 
     // Cooldown / duplicate check ─ enforces no-duplicate rule in live scan
     const now = Date.now();
@@ -792,16 +1005,10 @@ async function doScan(){
 
     let algoSummary =
         `LBPH: ${lbphConf.toFixed(1)}%` +
-        ` | Fisherfaces: ${fisherConf.toFixed(1)}%` +
+        ` | ArcFace: ${arcfaceConf.toFixed(1)}%` +
         ` | Hybrid: ${hybridConf.toFixed(1)}% (${quality})`;
 
-    if(lbphMatched && fisherMatched){
-        if(Number(lbph?.id) === Number(fisherfaces?.id)){
-            algoSummary += ' | Agreement';
-        } else {
-            algoSummary += ' | Disagreement';
-        }
-    }
+    algoSummary += ' | All 3 agree | Hybrid highest';
 
     if(att.success){
         cooldowns[consensusId] = now;
@@ -814,10 +1021,10 @@ async function doScan(){
         addScanItem(att.student_name, status, algoSummary, new Date().toLocaleTimeString());
         refreshStats();
     } else {
-        scanOverlay.textContent = `⚠️ ${att.message}`;
+        scanOverlay.textContent = `⚠️ ${att.message || 'Attendance recording failed.'}`;
         resultBox.className='result-inline fail';
         resultName.textContent = consensusName;
-        resultStatus.textContent = att.message;
+        resultStatus.textContent = (att.message || 'Attendance recording failed.') + (att.details ? ' · ' + String(att.details).slice(0,120) : '');
         if(att.message?.includes('already scanned')){
             cooldowns[consensusId] = now;
             cooldowns[consensusId+'_persisted'] = true;
@@ -860,6 +1067,7 @@ function resetCards(){
     resultBox.className='result-inline';
     resultName.textContent='Awaiting scan…';
     resultStatus.textContent='';
+    resetRecognitionPanel();
 }
 
 // ── Controls ──────────────────────────────────────────────────────────────
