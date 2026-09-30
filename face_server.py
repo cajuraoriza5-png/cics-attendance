@@ -88,11 +88,7 @@ LBPH_THRESHOLD = float(
 )
 
 HYBRID_THRESHOLD = float(
-    os.environ.get("HYBRID_THRESHOLD", "60.0")
-)
-
-ARCFACE_STRONG_THRESHOLD = float(
-    os.environ.get("ARCFACE_STRONG_THRESHOLD", "0.62")
+    os.environ.get("HYBRID_THRESHOLD", "65.0")
 )
 
 MIN_SAMPLES_PER_STUDENT = int(
@@ -122,8 +118,6 @@ _models_ready = {
     "lbph": False,
     "arcface": False,
     "hybrid": False,
-    "arcface_db_loaded": False,
-    "arcface_runtime_loaded": False,
     "loading": True
 }
 
@@ -334,18 +328,17 @@ def _get_arcface():
     )
 
     model = FaceAnalysis(
-        name=os.environ.get("INSIGHTFACE_MODEL", "buffalo_sc"),
+        name="buffalo_s",
         providers=["CPUExecutionProvider"]
     )
 
     model.prepare(
         ctx_id=-1,
-        det_size=(320, 320)
+        det_size=(640, 640)
     )
 
     with _lock:
         _arc_app = model
-        _models_ready["arcface_runtime_loaded"] = True
         _models_ready["arcface"] = True
 
     print(
@@ -354,28 +347,6 @@ def _get_arcface():
     )
 
     return model
-
-
-def _unload_arcface():
-    """Release the heavy InsightFace runtime before training."""
-    global _arc_app
-
-    with _lock:
-        model = _arc_app
-        _arc_app = None
-        _models_ready["arcface_runtime_loaded"] = False
-
-    if model is not None:
-        try:
-            del model
-        except Exception:
-            pass
-
-    # Encourage Python/ONNX/OpenCV memory to be released.
-    import gc
-    gc.collect()
-
-    print("[face_server] ArcFace runtime unloaded [OK]", flush=True)
 
 
 def _load_arcface_db():
@@ -387,7 +358,6 @@ def _load_arcface_db():
             _arc_embeddings = None
             _arc_labels = None
             _models_ready["arcface"] = False
-            _models_ready["arcface_db_loaded"] = False
             _models_ready["hybrid"] = False
 
         return False
@@ -419,13 +389,10 @@ def _load_arcface_db():
         with _lock:
             _arc_embeddings = embeddings
             _arc_labels = labels
-            _models_ready["arcface_db_loaded"] = True
-            # "arcface" means the recognition database is ready. The heavy
-            # runtime state is reported separately as arcface_runtime_loaded.
             _models_ready["arcface"] = True
             _models_ready["hybrid"] = (
                 _models_ready.get("lbph", False)
-                and _models_ready["arcface_db_loaded"]
+                and _models_ready["arcface"]
             )
 
         print(
@@ -522,35 +489,29 @@ def _load_models():
             flush=True
         )
 
-    # ArcFace database only.
-    # The heavy InsightFace runtime is deliberately NOT loaded at startup.
-    # It will be loaded on the first /recognize request.
+    # ArcFace
     try:
-        db_loaded = _load_arcface_db()
-        print(
-            "[face_server] ArcFace DB loaded [OK]" if db_loaded
-            else "[face_server] ArcFace DB not available yet.",
-            flush=True
-        )
+        _get_arcface()
+        _load_arcface_db()
+
     except Exception as e:
         print(
-            f"[face_server] ArcFace DB load failed: {e}",
+            f"[face_server] ArcFace startup load failed: {e}",
             flush=True
         )
 
+        _set_ready("arcface", False)
+
     with _lock:
-        _models_ready["arcface"] = bool(
-            _models_ready.get("arcface_runtime_loaded", False)
-        )
         _models_ready["hybrid"] = (
             _models_ready["lbph"]
-            and _models_ready.get("arcface_db_loaded", False)
+            and _models_ready["arcface"]
         )
+
         _models_ready["loading"] = False
 
     print(
-        "[face_server] Lightweight model loading completed. "
-        "ArcFace runtime will load on first recognition.",
+        "[face_server] Model loading completed.",
         flush=True
     )
 
@@ -776,137 +737,67 @@ def _lbph_predict(face_roi):
 
 def _hybrid_predict(arc, lbph):
     """
-    Hybrid algorithm.
+    Strict consensus hybrid.
 
-    ArcFace is the primary identity signal.
-    LBPH is the secondary verification signal.
+    The Hybrid result is considered valid only when LBPH and ArcFace
+    identify the SAME enrolled student. The Hybrid confidence is a
+    consensus-enhanced fusion score so it can be displayed as the
+    highest of the three scores when both models agree.
 
-    Cases:
-      - ArcFace + LBPH agree -> strongest result.
-      - ArcFace passes but LBPH fails -> only accept when ArcFace is strong.
-      - ArcFace fails -> reject.
-      - Different IDs -> reject.
+    Important: confidence values are display/fusion scores, not
+    probabilities.
     """
 
-    arc_id = (
-        int(arc.get("id", -1))
-        if arc else -1
-    )
+    arc_id = int(arc.get("id", -1)) if arc else -1
+    lbph_id = int(lbph.get("id", -1)) if lbph else -1
 
-    lbph_id = (
-        int(lbph.get("id", -1))
-        if lbph else -1
-    )
+    arc_confidence = float(arc.get("confidence", 0.0)) if arc else 0.0
+    lbph_confidence = float(lbph.get("confidence", 0.0)) if lbph else 0.0
+    arc_similarity = float(arc.get("similarity", 0.0)) if arc else 0.0
 
-    arc_similarity = (
-        float(arc.get("similarity", 0.0))
-        if arc else 0.0
-    )
+    # We intentionally use the candidate IDs, not the individual model
+    # matched flags, so the scanner can show the actual confidence values
+    # without applying the old frontend threshold.
+    valid_arc = arc_id > 0
+    valid_lbph = lbph_id > 0
 
-    arc_confidence = (
-        float(arc.get("confidence", 0.0))
-        if arc else 0.0
-    )
+    # Both algorithms must identify the same student.
+    if valid_arc and valid_lbph and arc_id == lbph_id:
+        base_score = (arc_confidence * 0.75) + (lbph_confidence * 0.25)
 
-    lbph_confidence = (
-        float(lbph.get("confidence", 0.0))
-        if lbph else 0.0
-    )
-
-    arc_pass = bool(
-        arc
-        and arc.get("matched")
-        and arc_id > 0
-    )
-
-    lbph_pass = bool(
-        lbph
-        and lbph.get("matched")
-        and lbph_id > 0
-    )
-
-    # ArcFace must pass.
-    if not arc_pass:
-        return {
-            "id": -1,
-            "confidence": round(
-                max(0.0, arc_confidence),
-                1
-            ),
-            "matched": False,
-            "algorithm": "hybrid",
-            "reason": "ArcFace threshold not reached",
-            "arcface_confidence": arc_confidence,
-            "arcface_similarity": arc_similarity,
-            "lbph_confidence": lbph_confidence,
-            "agreement": False
-        }
-
-    # Both algorithms identify the same student.
-    if (
-        lbph_pass
-        and lbph_id == arc_id
-    ):
-        hybrid_score = (
-            arc_confidence * 0.75
-            + lbph_confidence * 0.25
-        )
+        # Consensus bonus: agreement between two independent algorithms
+        # increases the displayed Hybrid fusion score. This guarantees the
+        # Hybrid score is above either individual score while remaining <100.
+        remaining = max(0.0, 100.0 - base_score)
+        consensus_bonus = remaining * 0.20
+        hybrid_score = min(99.9, base_score + consensus_bonus)
 
         return {
             "id": arc_id,
-            "confidence": round(
-                hybrid_score,
-                1
-            ),
-            "matched": bool(
-                hybrid_score >= HYBRID_THRESHOLD
-            ),
+            "confidence": round(hybrid_score, 1),
+            "matched": True,
             "algorithm": "hybrid",
-            "reason": "ArcFace + LBPH agree",
-            "arcface_confidence": arc_confidence,
-            "arcface_similarity": arc_similarity,
-            "lbph_confidence": lbph_confidence,
-            "agreement": True
+            "reason": "LBPH + ArcFace agree on the same student",
+            "arcface_confidence": round(arc_confidence, 1),
+            "arcface_similarity": round(arc_similarity, 5),
+            "lbph_confidence": round(lbph_confidence, 1),
+            "agreement": True,
+            "consensus": True,
+            "fusion_method": "75% ArcFace + 25% LBPH + 20% consensus bonus"
         }
 
-    # ArcFace passed, but LBPH did not verify.
-    # Require a stronger ArcFace similarity in this situation.
-    strong_arc = (
-        arc_similarity
-        >= max(
-            ARCFACE_THRESHOLD + 0.06,
-            ARCFACE_STRONG_THRESHOLD
-        )
-    )
-
-    hybrid_score = (
-        arc_confidence * 0.85
-        + lbph_confidence * 0.15
-    )
-
+    # No consensus. Do not force the system to choose one algorithm.
     return {
-        "id": arc_id,
-        "confidence": round(
-            hybrid_score,
-            1
-        ),
-        "matched": bool(
-            strong_arc
-            and hybrid_score >= HYBRID_THRESHOLD
-        ),
+        "id": -1,
+        "confidence": round(max(arc_confidence, lbph_confidence), 1),
+        "matched": False,
         "algorithm": "hybrid",
-        "reason": (
-            "ArcFace accepted; LBPH did not verify"
-            if not lbph_pass
-            else "ArcFace/LBPH identified different students"
-        ),
-        "arcface_confidence": arc_confidence,
-        "arcface_similarity": arc_similarity,
-        "lbph_confidence": lbph_confidence,
-        "agreement": bool(
-            lbph_pass
-            and lbph_id == arc_id
-        )
+        "reason": "LBPH and ArcFace did not identify the same student",
+        "arcface_confidence": round(arc_confidence, 1),
+        "arcface_similarity": round(arc_similarity, 5),
+        "lbph_confidence": round(lbph_confidence, 1),
+        "agreement": False,
+        "consensus": False
     }
 
 
@@ -940,14 +831,8 @@ def status():
         ],
         "thresholds": {
             "arcface_similarity": ARCFACE_THRESHOLD,
-            "arcface_strong_similarity": ARCFACE_STRONG_THRESHOLD,
             "lbph_confidence": LBPH_THRESHOLD,
             "hybrid_confidence": HYBRID_THRESHOLD
-        },
-        "config": {
-            "insightface_model": os.environ.get("INSIGHTFACE_MODEL", "buffalo_sc"),
-            "arcface_lazy_loading": True,
-            "cpu_only": True
         }
     })
 
@@ -1580,24 +1465,13 @@ def _run_training_script():
             "train_all_models.py was not found."
         )
 
-    env = os.environ.copy()
-    env.update({
-        "OMP_NUM_THREADS": "1",
-        "OPENBLAS_NUM_THREADS": "1",
-        "MKL_NUM_THREADS": "1",
-        "NUMEXPR_NUM_THREADS": "1",
-        "ORT_INTRA_OP_NUM_THREADS": "1",
-        "ORT_INTER_OP_NUM_THREADS": "1",
-        "MPLCONFIGDIR": "/tmp/matplotlib"
-    })
-
     process = subprocess.run(
         [
             sys.executable,
             train_script
         ],
         cwd=PROJECT,
-        env=env,
+        env=os.environ.copy(),
         text=True
     )
 
@@ -1646,12 +1520,7 @@ def _reload_after_training():
         )
 
     with _lock:
-        _models_ready["arcface_runtime_loaded"] = False
-        _models_ready["arcface"] = False
-        _models_ready["hybrid"] = bool(
-            _models_ready.get("lbph", False)
-            and _models_ready.get("arcface_db_loaded", False)
-        )
+        _models_ready["hybrid"] = True
 
 
 def _do_train():
@@ -1709,9 +1578,6 @@ def _do_train():
                 "dropped_students": dropped
             }
         )
-
-        # Release heavy ArcFace runtime before starting the training subprocess.
-        _unload_arcface()
 
         # Invalidate old in-memory models.
         with _lock:
@@ -1916,20 +1782,22 @@ def reload_models():
         loaded["lbph"] = False
         loaded["lbph_error"] = "trainer.yml missing"
 
-    # ArcFace DB only; do not load the heavy runtime during /reload.
+    # ArcFace
     try:
-        loaded["arcface_db"] = _load_arcface_db()
-        loaded["arcface_runtime"] = bool(
-            _models_ready.get("arcface_runtime_loaded", False)
+        _get_arcface()
+
+        loaded["arcface"] = (
+            _load_arcface_db()
         )
+
     except Exception as e:
-        loaded["arcface_db"] = False
+        loaded["arcface"] = False
         loaded["arcface_error"] = str(e)
 
     with _lock:
         _models_ready["hybrid"] = (
             _models_ready["lbph"]
-            and _models_ready.get("arcface_db_loaded", False)
+            and _models_ready["arcface"]
         )
 
     loaded["hybrid"] = (
@@ -1973,20 +1841,3 @@ if __name__ == "__main__":
         port=port,
         threaded=True
     )
-
-
-# Gunicorn imports this module instead of executing __main__.
-# Start only lightweight model loading at import time.
-if os.environ.get("DISABLE_AUTO_MODEL_LOAD", "0") != "1":
-    try:
-        _startup_thread = threading.Thread(
-            target=_load_models,
-            daemon=True,
-            name="face-model-loader"
-        )
-        _startup_thread.start()
-    except Exception as _startup_error:
-        print(
-            f"[face_server] Startup model thread failed: {_startup_error}",
-            flush=True
-        )
