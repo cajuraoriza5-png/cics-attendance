@@ -31,7 +31,8 @@ Output:
     arcface_embeddings.npz
 ===============================================================================
 """
-
+import zipfile
+import urllib.request
 import os
 import json
 import time
