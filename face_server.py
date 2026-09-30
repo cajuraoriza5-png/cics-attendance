@@ -1845,28 +1845,137 @@ def reload_models():
 # =============================================================================
 # GUNICORN / RENDER STARTUP
 # =============================================================================
-# Render uses Gunicorn:
-#   gunicorn face_server:app ...
+# IMPORTANT:
+# Do NOT call the full _load_models() here. That function creates the heavy
+# InsightFace network and can exceed Render's 512 MB memory during Gunicorn
+# startup. The ArcFace network is intentionally lazy-loaded by recognition.
 #
-# In that mode Python does NOT execute the __main__ section below.
-# Start model loading when the module is imported so /recognize never sees
-# an uninitialized face detector.
+# This startup function only prepares the lightweight pieces needed for the
+# API to become reachable:
+#   - Haar face detector
+#   - LBPH model
+#   - ArcFace embedding database
+#
+# The actual InsightFace/ArcFace network is loaded only when /recognize is used.
+
+def _load_render_lightweight_models():
+    global _lbph
+    global _cascade
+
+    print(
+        "[face_server] Render lightweight startup loading...",
+        flush=True
+    )
+
+    # Haar detector
+    try:
+        _cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades
+            + "haarcascade_frontalface_default.xml"
+        )
+
+        if _cascade.empty():
+            print(
+                "[face_server] ERROR: Haar Cascade failed.",
+                flush=True
+            )
+        else:
+            print(
+                "[face_server] Haar Cascade loaded [OK]",
+                flush=True
+            )
+    except Exception as e:
+        print(
+            f"[face_server] Haar Cascade load failed: {e}",
+            flush=True
+        )
+
+    # LBPH
+    if (
+        os.path.exists(TRAINER)
+        and _opencv_face_available()
+    ):
+        try:
+            recognizer = cv2.face.LBPHFaceRecognizer_create(
+                radius=1,
+                neighbors=8,
+                grid_x=8,
+                grid_y=8
+            )
+            recognizer.read(TRAINER)
+
+            with _lock:
+                _lbph = recognizer
+                _models_ready["lbph"] = True
+
+            print(
+                "[face_server] LBPH loaded [OK]",
+                flush=True
+            )
+        except Exception as e:
+            print(
+                f"[face_server] LBPH load failed: {e}",
+                flush=True
+            )
+            _set_ready("lbph", False)
+    else:
+        print(
+            "[face_server] LBPH model not available yet.",
+            flush=True
+        )
+
+    # ArcFace: load the already-trained embedding DB only.
+    # DO NOT call _get_arcface() here.
+    try:
+        arc_db_ok = _load_arcface_db()
+        if arc_db_ok:
+            print(
+                "[face_server] ArcFace embedding DB loaded [OK] "
+                "(network lazy-loaded)",
+                flush=True
+            )
+        else:
+            print(
+                "[face_server] ArcFace embedding DB not available yet.",
+                flush=True
+            )
+    except Exception as e:
+        print(
+            f"[face_server] ArcFace DB startup load failed: {e}",
+            flush=True
+        )
+        _set_ready("arcface", False)
+
+    with _lock:
+        _models_ready["hybrid"] = (
+            _models_ready["lbph"]
+            and _models_ready["arcface"]
+        )
+        _models_ready["loading"] = False
+
+    print(
+        "[face_server] Lightweight startup completed [OK].",
+        flush=True
+    )
+
+
 _startup_thread = None
 
 try:
     _startup_thread = threading.Thread(
-        target=_load_models,
+        target=_load_render_lightweight_models,
         daemon=True,
-        name="face-model-loader"
+        name="render-lightweight-loader"
     )
     _startup_thread.start()
+
     print(
-        "[face_server] Background model loading started.",
+        "[face_server] Background lightweight startup started.",
         flush=True
     )
 except Exception as _startup_error:
     print(
-        f"[face_server] Background model loading could not start: {_startup_error}",
+        f"[face_server] Background startup could not start: {_startup_error}",
         flush=True
     )
 
@@ -1882,11 +1991,12 @@ if __name__ == "__main__":
         flush=True
     )
 
+    # Gunicorn already starts the module-level loader above.
+    # For direct python execution, start the same lightweight loader.
     thread = threading.Thread(
-        target=_load_models,
+        target=_load_render_lightweight_models,
         daemon=True
     )
-
     thread.start()
 
     port = int(
