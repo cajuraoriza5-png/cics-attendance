@@ -36,16 +36,11 @@ import json
 import time
 import traceback
 import re
-import zipfile
-import urllib.request
-import shutil
 from collections import Counter
 
 import cv2
 import numpy as np
 
-# InsightFace is imported lazily. Only the ArcFace recognition ONNX model
-# (w600k_mbf.onnx) is loaded; FaceAnalysis is intentionally not used.
 INSIGHTFACE_IMPORT_ERROR = ""
 
 
@@ -409,12 +404,10 @@ def find_arcface_model():
         if path and os.path.isfile(path) and os.path.getsize(path) > 1024:
             return path
 
-    zip_candidates = [
+    for zip_path in [
         os.path.join(home, ".insightface", "models", "buffalo_s.zip"),
-        os.path.join(PROJECT, "models", "buffalo_s.zip"),
-    ]
-
-    for zip_path in zip_candidates:
+        os.path.join(PROJECT, "models", "buffalo_s.zip")
+    ]:
         if not os.path.isfile(zip_path):
             continue
 
@@ -424,10 +417,8 @@ def find_arcface_model():
             os.makedirs(target_dir, exist_ok=True)
             with zipfile.ZipFile(zip_path, "r") as zf:
                 member = next(
-                    (
-                        n for n in zf.namelist()
-                        if n.replace("\\", "/").endswith("w600k_mbf.onnx")
-                    ),
+                    (n for n in zf.namelist()
+                     if n.replace("\\", "/").endswith("w600k_mbf.onnx")),
                     None
                 )
                 if member:
@@ -436,7 +427,7 @@ def find_arcface_model():
                     if os.path.isfile(target) and os.path.getsize(target) > 1024:
                         return target
         except Exception as e:
-            print(f"[train] Lightweight ArcFace extraction failed: {e}", flush=True)
+            print(f"[train] Model extraction failed: {e}", flush=True)
 
     return None
 
@@ -454,100 +445,79 @@ def download_arcface_model():
         return target
 
     url = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip"
-    tmp_zip = zip_path + ".part"
+    tmp = zip_path + ".part"
 
-    print("[train] Downloading buffalo_s pack for lightweight ArcFace...", flush=True)
+    print("[train] Downloading ArcFace model pack...", flush=True)
 
-    try:
-        with urllib.request.urlopen(url, timeout=60) as response, open(tmp_zip, "wb") as dst:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                dst.write(chunk)
+    with urllib.request.urlopen(url, timeout=60) as response, open(tmp, "wb") as dst:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            dst.write(chunk)
 
-        os.replace(tmp_zip, zip_path)
+    os.replace(tmp, zip_path)
+    os.makedirs(target_dir, exist_ok=True)
 
-        os.makedirs(target_dir, exist_ok=True)
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            member = next(
-                (
-                    n for n in zf.namelist()
-                    if n.replace("\\", "/").endswith("w600k_mbf.onnx")
-                ),
-                None
-            )
-            if not member:
-                raise RuntimeError("w600k_mbf.onnx not found in buffalo_s.zip")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        member = next(
+            (n for n in zf.namelist()
+             if n.replace("\\", "/").endswith("w600k_mbf.onnx")),
+            None
+        )
+        if not member:
+            raise RuntimeError("w600k_mbf.onnx not found.")
 
-            with zf.open(member) as src, open(target, "wb") as dst:
-                shutil.copyfileobj(src, dst)
+        with zf.open(member) as src, open(target, "wb") as dst:
+            shutil.copyfileobj(src, dst)
 
-        return target
-
-    except Exception:
-        try:
-            if os.path.exists(tmp_zip):
-                os.remove(tmp_zip)
-        except Exception:
-            pass
-        raise
+    return target
 
 
 def get_arcface():
-    try:
-        from insightface import model_zoo
-    except Exception as e:
-        raise RuntimeError(
-            "InsightFace model_zoo is unavailable: " + str(e)
-        )
+    from insightface import model_zoo
 
-    model_path = find_arcface_model()
-    if model_path is None:
-        model_path = download_arcface_model()
+    path = find_arcface_model()
+    if path is None:
+        path = download_arcface_model()
 
-    print(
-        f"[train] Loading lightweight ArcFace recognition model: {model_path}",
-        flush=True
-    )
+    print(f"[train] Loading lightweight ArcFace: {path}", flush=True)
 
     model = model_zoo.get_model(
-        model_path,
+        path,
         providers=["CPUExecutionProvider"]
     )
-
     model.prepare(ctx_id=-1)
 
-    print(
-        "[train] Lightweight ArcFace recognition model loaded [OK]",
-        flush=True
-    )
-
+    print("[train] Lightweight ArcFace loaded [OK]", flush=True)
     return model
 
 
-def estimated_five_landmarks(width, height):
-    w = float(width)
-    h = float(height)
+def normalize_embedding(embedding):
+    embedding = np.asarray(embedding, dtype=np.float32)
 
-    return np.array([
-        [0.32 * w, 0.38 * h],
-        [0.68 * w, 0.38 * h],
-        [0.50 * w, 0.56 * h],
-        [0.38 * w, 0.72 * h],
-        [0.62 * w, 0.72 * h],
-    ], dtype=np.float32)
-
-
-def align_face_for_arcface(face_color):
-    if face_color is None or face_color.size == 0:
+    if embedding.ndim != 1 or embedding.size == 0:
         return None
 
-    h, w = face_color.shape[:2]
+    norm = np.linalg.norm(embedding)
+    if norm <= 1e-8:
+        return None
+
+    return (embedding / norm).astype(np.float32)
+
+
+def align_for_arcface(face):
+    h, w = face.shape[:2]
     if w < 20 or h < 20:
         return None
 
-    src = estimated_five_landmarks(w, h)
+    src = np.array([
+        [0.32*w, 0.38*h],
+        [0.68*w, 0.38*h],
+        [0.50*w, 0.56*h],
+        [0.38*w, 0.72*h],
+        [0.62*w, 0.72*h],
+    ], dtype=np.float32)
 
     dst = np.array([
         [38.2946, 51.6963],
@@ -557,244 +527,134 @@ def align_face_for_arcface(face_color):
         [70.7299, 92.2041],
     ], dtype=np.float32)
 
-    M, _ = cv2.estimateAffinePartial2D(
-        src, dst, method=cv2.LMEDS
-    )
+    M, _ = cv2.estimateAffinePartial2D(src, dst, method=cv2.LMEDS)
 
     if M is None:
-        return cv2.resize(
-            face_color,
-            (112, 112),
-            interpolation=cv2.INTER_AREA
-        )
+        return cv2.resize(face, (112,112), interpolation=cv2.INTER_AREA)
 
     return cv2.warpAffine(
-        face_color,
-        M,
-        (112, 112),
-        borderMode=cv2.BORDER_REPLICATE
+        face, M, (112,112), borderMode=cv2.BORDER_REPLICATE
     )
 
 
-def normalize_embedding(embedding):
-    embedding = np.asarray(
-        embedding,
-        dtype=np.float32
-    )
-
-    if (
-        embedding.ndim != 1
-        or embedding.size == 0
-    ):
-        return None
-
-    norm = np.linalg.norm(
-        embedding
-    )
-
-    if norm <= 1e-8:
-        return None
-
-    return (
-        embedding / norm
-    ).astype(
-        np.float32
-    )
-
-
-def train_arcface(
-    files,
-    model
-):
-    print(
-        "[train] Generating ArcFace embeddings...",
-        flush=True
-    )
+def train_arcface(files, model):
+    print("[train] Generating ArcFace embeddings in batches...", flush=True)
 
     embeddings = []
     labels = []
     failed = []
-
     total = len(files)
+    batch_size = int(os.environ.get("ARCFACE_BATCH_SIZE", "8"))
 
     cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades
-        + "haarcascade_frontalface_default.xml"
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     )
 
-    for index, (
-        path,
-        student_id,
-        filename
-    ) in enumerate(
-        files,
-        start=1
-    ):
-        try:
-            image = cv2.imread(
-                path,
-                cv2.IMREAD_COLOR
-            )
+    batch_faces = []
+    batch_labels = []
+    batch_names = []
 
+    def flush_batch():
+        if not batch_faces:
+            return
+
+        features = model.get_feat(batch_faces)
+
+        for emb, label, name in zip(features, batch_labels, batch_names):
+            norm = normalize_embedding(emb)
+            if norm is None:
+                failed.append(name)
+                continue
+            embeddings.append(norm)
+            labels.append(label)
+
+        batch_faces.clear()
+        batch_labels.clear()
+        batch_names.clear()
+
+    for index, (path, student_id, filename) in enumerate(files, start=1):
+        try:
+            image = cv2.imread(path, cv2.IMREAD_COLOR)
             if image is None:
-                failed.append(
-                    filename
-                )
+                failed.append(filename)
                 continue
 
-            # Haar is used for lightweight face detection. The same
-            # deterministic ArcFace alignment used by the server is applied
-            # here so training and recognition use identical preprocessing.
             gray = cv2.equalizeHist(
                 cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             )
 
             boxes = cascade.detectMultiScale(
-                gray,
-                1.1,
-                5,
-                minSize=(40, 40)
+                gray, 1.10, 4, minSize=(40,40)
             )
 
             if len(boxes) == 0:
                 boxes = cascade.detectMultiScale(
-                    gray,
-                    1.05,
-                    3,
-                    minSize=(30, 30)
+                    gray, 1.05, 3, minSize=(30,30)
                 )
 
             if len(boxes) == 0:
                 failed.append(filename)
                 continue
 
-            x, y, w, h = max(
-                boxes,
-                key=lambda r: r[2] * r[3]
-            )
+            x, y, w, h = max(boxes, key=lambda r: r[2] * r[3])
 
-            pad_x = int(w * 0.12)
-            pad_y = int(h * 0.12)
+            px, py = int(w*0.12), int(h*0.12)
+            x1, y1 = max(0,x-px), max(0,y-py)
+            x2, y2 = min(image.shape[1],x+w+px), min(image.shape[0],y+h+py)
 
-            x1 = max(0, x - pad_x)
-            y1 = max(0, y - pad_y)
-            x2 = min(image.shape[1], x + w + pad_x)
-            y2 = min(image.shape[0], y + h + pad_y)
-
-            face_crop = image[y1:y2, x1:x2]
-            aligned = align_face_for_arcface(face_crop)
-
+            aligned = align_for_arcface(image[y1:y2, x1:x2])
             if aligned is None:
                 failed.append(filename)
                 continue
 
-            features = model.get_feat([aligned])
-            if features is None or len(features) == 0:
-                failed.append(filename)
-                continue
+            batch_faces.append(aligned)
+            batch_labels.append(student_id)
+            batch_names.append(filename)
 
-            embedding = normalize_embedding(features[0])
+            if len(batch_faces) >= batch_size:
+                flush_batch()
 
-            if embedding is None:
-                failed.append(
-                    filename
+            if index % batch_size == 0 or index == total:
+                progress = 40 + int((index / max(1,total)) * 45)
+                update_status(
+                    "running",
+                    f"ArcFace embeddings {index}/{total}...",
+                    progress
                 )
-                continue
-
-            embeddings.append(
-                embedding
-            )
-
-            labels.append(
-                student_id
-            )
-
-            progress = (
-                40
-                + int(
-                    (index / max(1, total))
-                    * 45
-                )
-            )
-
-            update_status(
-                "running",
-                (
-                    "Generating ArcFace embeddings "
-                    f"{index}/{total}..."
-                ),
-                progress
-            )
 
         except Exception as e:
-            print(
-                f"[train] ArcFace failed for "
-                f"{filename}: {e}",
-                flush=True
-            )
+            print(f"[train] ArcFace failed for {filename}: {e}", flush=True)
+            failed.append(filename)
 
-            failed.append(
-                filename
-            )
+    flush_batch()
 
     if not embeddings:
-        raise RuntimeError(
-            "ArcFace could not generate any embeddings. "
-            "Check that the enrolled images contain detectable faces."
-        )
+        raise RuntimeError("ArcFace could not generate any embeddings.")
 
-    embedding_array = np.asarray(
-        embeddings,
-        dtype=np.float32
-    )
+    embedding_array = np.asarray(embeddings, dtype=np.float32)
+    label_array = np.asarray(labels, dtype=np.int32)
 
-    label_array = np.asarray(
-        labels,
-        dtype=np.int32
-    )
-
-    # Save atomically.
     temp = ARC_DB + ".tmp"
-
     np.savez_compressed(
         temp,
         embeddings=embedding_array,
         labels=label_array
     )
 
-    # np.savez may add .npz.
-    actual_temp = (
-        temp
-        if os.path.exists(temp)
-        else temp + ".npz"
-    )
+    actual_temp = temp if os.path.exists(temp) else temp + ".npz"
+    os.replace(actual_temp, ARC_DB)
 
-    os.replace(
-        actual_temp,
-        ARC_DB
-    )
+    gc.collect()
 
-    print(
-        f"[train] ArcFace DB saved: {ARC_DB}",
-        flush=True
-    )
+    print(f"[train] ArcFace DB saved: {ARC_DB}", flush=True)
 
     return {
         "ok": True,
-        "samples": int(
-            len(embedding_array)
-        ),
-        "students": int(
-            len(
-                np.unique(
-                    label_array
-                )
-            )
-        ),
-        "failed_count": len(
-            failed
-        ),
-        "failed_images": failed[:50]
+        "samples": int(len(embedding_array)),
+        "students": int(len(np.unique(label_array))),
+        "failed_count": len(failed),
+        "failed_images": failed[:50],
+        "batch_size": batch_size
     }
 
 
