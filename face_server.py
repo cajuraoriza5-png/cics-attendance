@@ -29,6 +29,8 @@ import subprocess
 import time
 import re
 import shutil
+import zipfile
+import urllib.request
 from collections import Counter
 
 import numpy as np
@@ -37,11 +39,12 @@ import cv2
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-try:
-    from insightface.app import FaceAnalysis
-except Exception as e:
-    FaceAnalysis = None
-    _INSIGHTFACE_IMPORT_ERROR = str(e)
+# InsightFace is imported lazily. We intentionally load ONLY the ArcFace
+# recognition ONNX model (w600k_mbf.onnx), not the full FaceAnalysis bundle.
+# This avoids loading InsightFace's detector and other models on Render's
+# 512 MB instance.
+_INSIGHTFACE_IMPORT_ERROR = ""
+_arcface_model_zoo = None
 
 
 # =============================================================================
@@ -337,47 +340,266 @@ def _load_gray_face(path):
 # ARCFACE RUNTIME
 # =============================================================================
 
+
+def _find_arcface_recognition_onnx():
+    """
+    Locate the lightweight ArcFace recognition model used by buffalo_s.
+
+    We use ONLY w600k_mbf.onnx. The buffalo_s detector is deliberately not
+    loaded because Haar Cascade already performs face detection.
+    """
+    candidates = []
+
+    custom = os.environ.get("ARCFACE_MODEL_PATH", "").strip()
+    if custom:
+        candidates.append(custom)
+
+    home = os.path.expanduser("~")
+    candidates.extend([
+        os.path.join(home, ".insightface", "models", "buffalo_s", "w600k_mbf.onnx"),
+        os.path.join(home, ".insightface", "models", "buffalo_s", "w600k_mbf.onnx"),
+        os.path.join(PROJECT, "models", "w600k_mbf.onnx"),
+    ])
+
+    for path in candidates:
+        if path and os.path.isfile(path) and os.path.getsize(path) > 1024:
+            return path
+
+    # If InsightFace already downloaded the buffalo_s.zip pack, extract ONLY
+    # the recognition model. This does not instantiate FaceAnalysis.
+    zip_candidates = [
+        os.path.join(home, ".insightface", "models", "buffalo_s.zip"),
+        os.path.join(PROJECT, "models", "buffalo_s.zip"),
+    ]
+
+    for zip_path in zip_candidates:
+        if not os.path.isfile(zip_path):
+            continue
+
+        target_dir = os.path.join(
+            os.path.dirname(zip_path),
+            "buffalo_s"
+        )
+        target = os.path.join(target_dir, "w600k_mbf.onnx")
+
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                member = None
+                for name in zf.namelist():
+                    if name.replace("\\", "/").endswith("/w600k_mbf.onnx") or name.replace("\\", "/").endswith("w600k_mbf.onnx"):
+                        member = name
+                        break
+
+                if member:
+                    with zf.open(member) as src, open(target, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+
+                    if os.path.isfile(target) and os.path.getsize(target) > 1024:
+                        return target
+        except Exception as e:
+            print(
+                f"[face_server] Could not extract lightweight ArcFace model: {e}",
+                flush=True
+            )
+
+    return None
+
+
+def _download_lightweight_arcface_model():
+    """
+    Last-resort download of the buffalo_s model pack, followed by extraction
+    of ONLY w600k_mbf.onnx. Streaming keeps the ZIP out of RAM.
+    """
+    home = os.path.expanduser("~")
+    model_root = os.path.join(home, ".insightface", "models")
+    os.makedirs(model_root, exist_ok=True)
+
+    zip_path = os.path.join(model_root, "buffalo_s.zip")
+    target_dir = os.path.join(model_root, "buffalo_s")
+    target = os.path.join(target_dir, "w600k_mbf.onnx")
+
+    if os.path.isfile(target) and os.path.getsize(target) > 1024:
+        return target
+
+    url = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip"
+
+    print(
+        "[face_server] Downloading buffalo_s pack for the lightweight ArcFace model...",
+        flush=True
+    )
+
+    tmp_zip = zip_path + ".part"
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response, open(tmp_zip, "wb") as dst:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+
+        os.replace(tmp_zip, zip_path)
+
+        os.makedirs(target_dir, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            member = None
+            for name in zf.namelist():
+                if name.replace("\\", "/").endswith("/w600k_mbf.onnx") or name.replace("\\", "/").endswith("w600k_mbf.onnx"):
+                    member = name
+                    break
+
+            if not member:
+                raise RuntimeError("w600k_mbf.onnx was not found inside buffalo_s.zip.")
+
+            with zf.open(member) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+        return target
+
+    except Exception:
+        try:
+            if os.path.exists(tmp_zip):
+                os.remove(tmp_zip)
+        except Exception:
+            pass
+        raise
+
+
 def _get_arcface():
+    """
+    Load ONLY the ArcFace recognition ONNX model.
+
+    This replaces InsightFace FaceAnalysis. Haar Cascade is used separately
+    for detection, so the heavy InsightFace detector is never loaded.
+    """
     global _arc_app
+    global _arcface_model_zoo
+    global _INSIGHTFACE_IMPORT_ERROR
 
     with _lock:
         if _arc_app is not None:
             return _arc_app
 
-    if FaceAnalysis is None:
+    try:
+        from insightface import model_zoo
+        _arcface_model_zoo = model_zoo
+    except Exception as e:
+        _INSIGHTFACE_IMPORT_ERROR = str(e)
         raise RuntimeError(
-            "InsightFace is unavailable: "
-            + globals().get(
-                "_INSIGHTFACE_IMPORT_ERROR",
-                "unknown import error"
-            )
+            "InsightFace model_zoo is unavailable: " + str(e)
         )
 
+    model_path = _find_arcface_recognition_onnx()
+
+    if model_path is None:
+        model_path = _download_lightweight_arcface_model()
+
     print(
-        "[face_server] Loading InsightFace buffalo_s...",
+        f"[face_server] Loading lightweight ArcFace recognition model: {model_path}",
         flush=True
     )
 
-    model = FaceAnalysis(
-        name="buffalo_s",
+    model = model_zoo.get_model(
+        model_path,
         providers=["CPUExecutionProvider"]
     )
 
-    model.prepare(
-        ctx_id=-1,
-        det_size=(640, 640)
-    )
+    model.prepare(ctx_id=-1)
 
     with _lock:
         _arc_app = model
-        _models_ready["arcface"] = True
+        _models_ready["arcface"] = (
+            _arc_embeddings is not None
+            and len(_arc_embeddings) > 0
+        )
 
     print(
-        "[face_server] ArcFace/InsightFace loaded [OK]",
+        "[face_server] Lightweight ArcFace recognition model loaded [OK]",
         flush=True
     )
 
     return model
+
+
+def _estimated_five_landmarks(width, height):
+    """
+    Estimate five facial landmarks from a Haar bounding box.
+
+    This keeps ArcFace lightweight because no InsightFace detector/landmark
+    network is loaded. The same deterministic alignment is used during
+    training and recognition.
+    """
+    w = float(width)
+    h = float(height)
+
+    return np.array([
+        [0.32 * w, 0.38 * h],  # left eye
+        [0.68 * w, 0.38 * h],  # right eye
+        [0.50 * w, 0.56 * h],  # nose
+        [0.38 * w, 0.72 * h],  # left mouth
+        [0.62 * w, 0.72 * h],  # right mouth
+    ], dtype=np.float32)
+
+
+def _arcface_align_from_bbox(face_color):
+    """
+    Convert the Haar face crop into the standard 112x112 ArcFace input.
+    """
+    if face_color is None or face_color.size == 0:
+        return None
+
+    h, w = face_color.shape[:2]
+    if w < 20 or h < 20:
+        return None
+
+    src = _estimated_five_landmarks(w, h)
+
+    dst = np.array([
+        [38.2946, 51.6963],
+        [73.5318, 51.5014],
+        [56.0252, 71.7366],
+        [41.5493, 92.3655],
+        [70.7299, 92.2041],
+    ], dtype=np.float32)
+
+    # Use all five points for a stable least-squares similarity transform.
+    M, _ = cv2.estimateAffinePartial2D(
+        src,
+        dst,
+        method=cv2.LMEDS
+    )
+
+    if M is None:
+        return cv2.resize(
+            face_color,
+            (112, 112),
+            interpolation=cv2.INTER_AREA
+        )
+
+    return cv2.warpAffine(
+        face_color,
+        M,
+        (112, 112),
+        borderMode=cv2.BORDER_REPLICATE
+    )
+
+
+def _arcface_embedding_from_face(face_color):
+    model = _get_arcface()
+
+    aligned = _arcface_align_from_bbox(face_color)
+    if aligned is None:
+        raise ValueError("Could not align the face for ArcFace.")
+
+    # ArcFaceONNX.get_feat expects aligned face images.
+    feat = model.get_feat([aligned])
+    embedding = np.asarray(feat[0], dtype=np.float32)
+
+    norm = np.linalg.norm(embedding)
+    if norm <= 1e-8:
+        raise ValueError("ArcFace embedding has zero norm.")
+
+    return (embedding / norm).astype(np.float32)
 
 
 def _load_arcface_db():
@@ -520,14 +742,14 @@ def _load_models():
             flush=True
         )
 
-    # ArcFace
+    # ArcFace: only load the embedding DB during lightweight startup.
+    # The recognition network is lazy-loaded on first recognition.
     try:
-        _get_arcface()
         _load_arcface_db()
 
     except Exception as e:
         print(
-            f"[face_server] ArcFace startup load failed: {e}",
+            f"[face_server] ArcFace DB startup load failed: {e}",
             flush=True
         )
 
@@ -551,25 +773,12 @@ def _load_models():
 # ARCFACE PREDICTION
 # =============================================================================
 
+
 def _arcface_predict(face_color):
     """
-    Generate an ArcFace embedding for the query face and compare it with
-    every enrolled embedding using cosine similarity.
+    Generate an ArcFace embedding using ONLY the lightweight recognition
+    ONNX model and compare it with enrolled embeddings.
     """
-
-    try:
-        model = _get_arcface()
-
-    except Exception as e:
-        return {
-            "id": -1,
-            "confidence": 0.0,
-            "similarity": 0.0,
-            "matched": False,
-            "algorithm": "arcface",
-            "error": str(e)
-        }
-
     with _lock:
         db_embeddings = _arc_embeddings
         db_labels = _arc_labels
@@ -589,48 +798,8 @@ def _arcface_predict(face_color):
         }
 
     try:
-        faces = model.get(face_color)
+        embedding = _arcface_embedding_from_face(face_color)
 
-        if not faces:
-            return {
-                "id": -1,
-                "confidence": 0.0,
-                "similarity": 0.0,
-                "matched": False,
-                "algorithm": "arcface",
-                "error": "ArcFace could not extract an embedding."
-            }
-
-        face = max(
-            faces,
-            key=lambda f: float(
-                getattr(f, "det_score", 0.0) or 0.0
-            )
-        )
-
-        embedding = np.asarray(
-            face.embedding,
-            dtype=np.float32
-        )
-
-        if (
-            embedding.ndim != 1
-            or embedding.size == 0
-        ):
-            raise ValueError(
-                "Invalid ArcFace embedding."
-            )
-
-        norm = np.linalg.norm(embedding)
-
-        if norm <= 1e-8:
-            raise ValueError(
-                "ArcFace embedding has zero norm."
-            )
-
-        embedding = embedding / norm
-
-        # Compare query against every enrolled embedding.
         sims = np.asarray(
             [
                 _cosine(embedding, reference)
@@ -640,29 +809,17 @@ def _arcface_predict(face_color):
         )
 
         best_index = int(np.argmax(sims))
-        best_similarity = float(
-            sims[best_index]
-        )
-        best_id = int(
-            db_labels[best_index]
-        )
+        best_similarity = float(sims[best_index])
+        best_id = int(db_labels[best_index])
 
-        # Average the best few examples of the winning student.
-        same_student = np.where(
-            db_labels == best_id
-        )[0]
+        same_student = np.where(db_labels == best_id)[0]
 
         student_sims = sorted(
-            [
-                float(sims[i])
-                for i in same_student
-            ],
+            [float(sims[i]) for i in same_student],
             reverse=True
         )
 
-        top_k = student_sims[
-            :min(5, len(student_sims))
-        ]
+        top_k = student_sims[:min(5, len(student_sims))]
 
         representative_similarity = (
             float(np.mean(top_k))
@@ -670,29 +827,16 @@ def _arcface_predict(face_color):
             else best_similarity
         )
 
-        matched = (
-            best_similarity
-            >= ARCFACE_THRESHOLD
-        )
+        matched = best_similarity >= ARCFACE_THRESHOLD
 
         return {
             "id": best_id,
-            "confidence": _arcface_percent(
-                representative_similarity
-            ),
-            "similarity": round(
-                best_similarity,
-                5
-            ),
-            "representative_similarity": round(
-                representative_similarity,
-                5
-            ),
+            "confidence": _arcface_percent(representative_similarity),
+            "similarity": round(best_similarity, 5),
+            "representative_similarity": round(representative_similarity, 5),
             "matched": bool(matched),
             "algorithm": "arcface",
-            "samples_compared": int(
-                len(same_student)
-            )
+            "samples_compared": int(len(same_student))
         }
 
     except Exception as e:
@@ -794,14 +938,24 @@ def _hybrid_predict(arc, lbph):
 
     # Both algorithms must identify the same student.
     if valid_arc and valid_lbph and arc_id == lbph_id:
+        # Weighted fusion retains ArcFace as the primary signal.
         base_score = (arc_confidence * 0.75) + (lbph_confidence * 0.25)
 
-        # Consensus bonus: agreement between two independent algorithms
-        # increases the displayed Hybrid fusion score. This guarantees the
-        # Hybrid score is above either individual score while remaining <100.
-        remaining = max(0.0, 100.0 - base_score)
-        consensus_bonus = remaining * 0.20
-        hybrid_score = min(99.9, base_score + consensus_bonus)
+        # Adviser requirement: when both algorithms agree, Hybrid must be
+        # strictly higher than BOTH individual displayed confidences.
+        strongest = max(arc_confidence, lbph_confidence)
+        remaining = max(0.01, 100.0 - strongest)
+        consensus_bonus = max(0.25, remaining * 0.20)
+
+        hybrid_score = max(
+            base_score + 0.01,
+            strongest + consensus_bonus
+        )
+        hybrid_score = min(99.99, hybrid_score)
+
+        # Preserve strict ordering even for very high scores.
+        if hybrid_score <= strongest and strongest < 99.99:
+            hybrid_score = min(99.99, strongest + 0.01)
 
         return {
             "id": arc_id,
@@ -814,7 +968,7 @@ def _hybrid_predict(arc, lbph):
             "lbph_confidence": round(lbph_confidence, 1),
             "agreement": True,
             "consensus": True,
-            "fusion_method": "75% ArcFace + 25% LBPH + 20% consensus bonus"
+            "fusion_method": "75% ArcFace + 25% LBPH + consensus bonus; Hybrid highest"
         }
 
     # No consensus. Do not force the system to choose one algorithm.
@@ -855,6 +1009,7 @@ def status():
     return jsonify({
         "ok": True,
         "models": models,
+        "arcface_network_loaded": bool(_arc_app is not None),
         "algorithms": [
             "LBPH",
             "ArcFace",
@@ -1813,14 +1968,13 @@ def reload_models():
         loaded["lbph"] = False
         loaded["lbph_error"] = "trainer.yml missing"
 
-    # ArcFace
+    # ArcFace: reload ONLY the enrolled embedding database.
+    # The recognition ONNX network remains lazy-loaded to protect RAM.
     try:
-        _get_arcface()
-
-        loaded["arcface"] = (
-            _load_arcface_db()
+        loaded["arcface"] = _load_arcface_db()
+        loaded["arcface_network"] = (
+            _arc_app is not None
         )
-
     except Exception as e:
         loaded["arcface"] = False
         loaded["arcface_error"] = str(e)
