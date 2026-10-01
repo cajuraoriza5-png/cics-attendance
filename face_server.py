@@ -210,14 +210,26 @@ def _opencv_face_available():
 
 def _lbph_confidence(distance):
     """
-    Convert OpenCV LBPH distance to a display/decision score.
+    Convert LBPH distance into a normalized display score.
 
-    This is NOT a probability.
+    LBPH itself returns a distance, where LOWER is better.
+    This value is a confidence index for display/fusion only;
+    it is NOT a probability.
+
+    LBPH_THRESHOLD=60 corresponds to an approximate distance of
+    112.5 using the previous display scale. We map that decision
+    boundary to 50 and a perfect distance of 0 to 100.
     """
-    raw = (1.0 - float(distance) / 150.0) * 100.0
+    d = max(0.0, float(distance))
+    decision_distance = 112.5
+
+    score = 50.0 + (
+        (decision_distance - d)
+        / decision_distance
+    ) * 50.0
 
     return round(
-        max(0.0, min(100.0, raw + 35.0)),
+        max(0.0, min(100.0, score)),
         1
     )
 
@@ -241,14 +253,28 @@ def _cosine(a, b):
 
 def _arcface_percent(similarity):
     """
-    Display score only.
+    Convert ArcFace cosine similarity into a normalized display score.
 
-    Recognition uses raw cosine similarity and ARCFACE_THRESHOLD.
+    Recognition still uses the raw cosine similarity and
+    ARCFACE_THRESHOLD. This score is only a confidence index for
+    display/fusion and is NOT a probability.
+
+    The configured ArcFace decision threshold maps to 50, while
+    similarity of 1.0 maps to 100.
     """
-    value = ((float(similarity) + 1.0) / 2.0) * 100.0
+    sim = float(similarity)
+    threshold = float(ARCFACE_THRESHOLD)
+
+    if threshold >= 0.999:
+        score = 100.0 if sim >= threshold else 0.0
+    else:
+        score = 50.0 + (
+            (sim - threshold)
+            / (1.0 - threshold)
+        ) * 50.0
 
     return round(
-        max(0.0, min(100.0, value)),
+        max(0.0, min(100.0, score)),
         1
     )
 
@@ -912,75 +938,121 @@ def _lbph_predict(face_roi):
 
 def _hybrid_predict(arc, lbph):
     """
-    Strict consensus hybrid.
+    Strict consensus Hybrid.
 
-    The Hybrid result is considered valid only when LBPH and ArcFace
-    identify the SAME enrolled student. The Hybrid confidence is a
-    consensus-enhanced fusion score so it can be displayed as the
-    highest of the three scores when both models agree.
-
-    Important: confidence values are display/fusion scores, not
-    probabilities.
+    Requirements:
+      1. ArcFace and LBPH must identify the SAME student.
+      2. Hybrid is valid only when both candidates agree.
+      3. Hybrid confidence is strictly higher than both individual
+         confidence indices when consensus exists.
+      4. The individual confidence values remain separate because
+         LBPH distance and ArcFace similarity are different measurements.
     """
 
     arc_id = int(arc.get("id", -1)) if arc else -1
     lbph_id = int(lbph.get("id", -1)) if lbph else -1
 
-    arc_confidence = float(arc.get("confidence", 0.0)) if arc else 0.0
-    lbph_confidence = float(lbph.get("confidence", 0.0)) if lbph else 0.0
-    arc_similarity = float(arc.get("similarity", 0.0)) if arc else 0.0
+    arc_confidence = float(
+        arc.get("confidence", 0.0)
+    ) if arc else 0.0
 
-    # We intentionally use the candidate IDs, not the individual model
-    # matched flags, so the scanner can show the actual confidence values
-    # without applying the old frontend threshold.
-    valid_arc = arc_id > 0
-    valid_lbph = lbph_id > 0
+    lbph_confidence = float(
+        lbph.get("confidence", 0.0)
+    ) if lbph else 0.0
 
-    # Both algorithms must identify the same student.
-    if valid_arc and valid_lbph and arc_id == lbph_id:
-        # Weighted fusion retains ArcFace as the primary signal.
-        base_score = (arc_confidence * 0.75) + (lbph_confidence * 0.25)
+    arc_similarity = float(
+        arc.get("similarity", 0.0)
+    ) if arc else 0.0
 
-        # Adviser requirement: when both algorithms agree, Hybrid must be
-        # strictly higher than BOTH individual displayed confidences.
-        strongest = max(arc_confidence, lbph_confidence)
-        remaining = max(0.01, 100.0 - strongest)
-        consensus_bonus = max(0.25, remaining * 0.20)
+    if (
+        arc_id > 0
+        and lbph_id > 0
+        and arc_id == lbph_id
+    ):
+        strongest = max(
+            arc_confidence,
+            lbph_confidence
+        )
+
+        # ArcFace remains the primary signal.
+        weighted = (
+            arc_confidence * 0.75
+            + lbph_confidence * 0.25
+        )
+
+        # Consensus bonus is based on the strongest individual score.
+        # This guarantees Hybrid > ArcFace and Hybrid > LBPH whenever
+        # both algorithms agree.
+        remaining = max(
+            0.05,
+            100.0 - strongest
+        )
+
+        consensus_bonus = max(
+            0.5,
+            remaining * 0.20
+        )
 
         hybrid_score = max(
-            base_score + 0.01,
+            weighted + 0.1,
             strongest + consensus_bonus
         )
-        hybrid_score = min(99.99, hybrid_score)
 
-        # Preserve strict ordering even for very high scores.
-        if hybrid_score <= strongest and strongest < 99.99:
-            hybrid_score = min(99.99, strongest + 0.01)
+        hybrid_score = min(
+            99.9,
+            hybrid_score
+        )
 
         return {
             "id": arc_id,
-            "confidence": round(hybrid_score, 1),
+            "confidence": round(
+                hybrid_score,
+                1
+            ),
             "matched": True,
             "algorithm": "hybrid",
             "reason": "LBPH + ArcFace agree on the same student",
-            "arcface_confidence": round(arc_confidence, 1),
-            "arcface_similarity": round(arc_similarity, 5),
-            "lbph_confidence": round(lbph_confidence, 1),
+            "arcface_confidence": round(
+                arc_confidence,
+                1
+            ),
+            "arcface_similarity": round(
+                arc_similarity,
+                5
+            ),
+            "lbph_confidence": round(
+                lbph_confidence,
+                1
+            ),
             "agreement": True,
             "consensus": True,
-            "fusion_method": "75% ArcFace + 25% LBPH + consensus bonus; Hybrid highest"
+            "fusion_method": (
+                "75% ArcFace + 25% LBPH + "
+                "20% consensus bonus"
+            )
         }
 
-    # No consensus. Do not force the system to choose one algorithm.
     return {
         "id": -1,
-        "confidence": round(max(arc_confidence, lbph_confidence), 1),
+        "confidence": 0.0,
         "matched": False,
         "algorithm": "hybrid",
-        "reason": "LBPH and ArcFace did not identify the same student",
-        "arcface_confidence": round(arc_confidence, 1),
-        "arcface_similarity": round(arc_similarity, 5),
-        "lbph_confidence": round(lbph_confidence, 1),
+        "reason": (
+            "LBPH and ArcFace did not identify "
+            "the same student"
+        ),
+        "arcface_confidence": round(
+            arc_confidence,
+            1
+        ),
+        "arcface_similarity": round(
+            arc_similarity,
+            5
+        ),
+        "lbph_confidence": round(
+            lbph_confidence,
+            1
+        ),
         "agreement": False,
         "consensus": False
     }
