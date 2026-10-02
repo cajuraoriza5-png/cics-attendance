@@ -1,3 +1,7 @@
+import zipfile
+import urllib.request
+import shutil
+import gc
 """
 train_all_models.py
 ===============================================================================
@@ -33,10 +37,6 @@ Output:
 
 import os
 import json
-import zipfile
-import urllib.request
-import shutil
-import gc
 import time
 import traceback
 import re
