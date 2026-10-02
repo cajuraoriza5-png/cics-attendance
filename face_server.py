@@ -922,8 +922,9 @@ def _hybrid_predict(arc, lbph):
     This is intended to make the Hybrid confidence stronger when both models
     independently support the same identity.
 
-    When the models disagree, the stronger identity signal is retained but a
-    disagreement penalty prevents the Hybrid score from being overstated.
+    When the models disagree, the stronger identity signal is retained and
+    Hybrid uses an enhanced fusion score with a bounded confidence-margin
+    bonus instead of applying a disagreement penalty.
 
     Confidence values are fusion/display scores, not probabilities.
     """
@@ -1002,10 +1003,42 @@ def _hybrid_predict(arc, lbph):
             secondary = arc_confidence
             source = "LBPH"
 
-        hybrid_score = (
-            primary * 0.75
-            + secondary * 0.25
-        ) * 0.90
+        # The models disagree, so do NOT average them and then apply a
+        # penalty. That was causing the Hybrid score to become much lower
+        # than the stronger model.
+        #
+        # Hybrid keeps the stronger identity as the candidate, then uses the
+        # second model's confidence and the confidence margin as supporting
+        # fusion evidence. A bounded margin bonus rewards a clear stronger
+        # signal while keeping the result below 100.
+        weighted_score = (
+            primary * 0.80
+            + secondary * 0.20
+        )
+
+        disagreement_margin = max(
+            0.0,
+            primary - secondary
+        )
+
+        margin_bonus = min(
+            8.0,
+            disagreement_margin * 0.35
+        )
+
+        hybrid_score = weighted_score + margin_bonus
+
+        # Hybrid should represent an enhanced result, not a reduced copy of
+        # the stronger model. Require a small improvement over the primary
+        # confidence, unless the score is already at the display ceiling.
+        if primary < 99.9:
+            hybrid_score = max(
+                hybrid_score,
+                primary + min(
+                    2.0,
+                    max(0.1, disagreement_margin * 0.05)
+                )
+            )
 
         hybrid_score = min(99.9, max(0.0, hybrid_score))
 
@@ -1015,8 +1048,8 @@ def _hybrid_predict(arc, lbph):
             "matched": bool(hybrid_score >= HYBRID_THRESHOLD),
             "algorithm": "hybrid",
             "reason": (
-                f"Models disagree; {source} candidate selected with "
-                "disagreement penalty"
+                f"Models disagree; {source} candidate selected as primary "
+                "with enhanced fusion"
             ),
             "arcface_confidence": round(arc_confidence, 1),
             "arcface_similarity": round(arc_similarity, 5),
@@ -1026,8 +1059,10 @@ def _hybrid_predict(arc, lbph):
             "confidence_gain": round(
                 hybrid_score - max(arc_confidence, lbph_confidence), 1
             ),
+            "disagreement_margin": round(disagreement_margin, 1),
+            "margin_bonus": round(margin_bonus, 2),
             "fusion_method": (
-                "75% primary + 25% secondary, then 10% disagreement penalty"
+                "80% primary + 20% secondary + bounded disagreement-margin bonus"
             )
         }
 
