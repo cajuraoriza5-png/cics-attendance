@@ -20,6 +20,8 @@ Important:
 """
 
 import os
+
+HYBRID_FUSION_VERSION = "HYBRID-LBPH-ARCFACE-V3"
 import sys
 import json
 import base64
