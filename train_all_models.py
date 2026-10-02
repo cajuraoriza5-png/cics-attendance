@@ -1,3 +1,4 @@
+import zipfile
 import urllib.request
 """
 train_all_models.py
@@ -31,10 +32,7 @@ Output:
     arcface_embeddings.npz
 ===============================================================================
 """
-import zipfile
-import urllib.request
-import shutil
-import gc
+
 import os
 import json
 import time
