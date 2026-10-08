@@ -6,7 +6,7 @@ import gc
 train_all_models.py
 ===============================================================================
 
-VERSION: TRUE_80_20_HOLDOUT_RENDER_512MB
+VERSION: TRUE_80_20_SAME_STUDENT_FUSION_RENDER_512MB
 
 CICS Attendance - Model Training
 
@@ -284,26 +284,45 @@ def build_training_dataset():
 # =============================================================================
 
 def load_gray_face(path):
-    image = cv2.imread(
-        path,
-        cv2.IMREAD_GRAYSCALE
-    )
+    """
+    LBPH preprocessing used by both training and runtime recognition.
 
+    The previous trainer resized the WHOLE image while the server passed a
+    detected face crop to LBPH. That mismatch can make LBPH identify the
+    wrong student. We now detect the largest face first, then apply the same
+    grayscale/equalization/100x100 preprocessing used by the scanner.
+    """
+    image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     if image is None:
         return None
 
-    image = cv2.resize(
-        image,
-        (100, 100),
-        interpolation=cv2.INTER_AREA
+    eq = cv2.equalizeHist(image)
+
+    cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     )
+    if cascade.empty():
+        return None
 
-    image = cv2.equalizeHist(
-        image
+    boxes = cascade.detectMultiScale(
+        eq, 1.1, 5, minSize=(40, 40)
     )
+    if len(boxes) == 0:
+        boxes = cascade.detectMultiScale(
+            eq, 1.05, 3, minSize=(30, 30)
+        )
 
-    return image
+    if len(boxes) == 0:
+        return None
 
+    x, y, w, h = max(boxes, key=lambda r: r[2] * r[3])
+    face = image[y:y+h, x:x+w]
+    if face is None or face.size == 0:
+        return None
+
+    face = cv2.resize(face, (100, 100), interpolation=cv2.INTER_AREA)
+    face = cv2.equalizeHist(face)
+    return face
 
 def train_lbph(files):
     print(
@@ -759,432 +778,258 @@ def _arcface_display_score(similarity):
     return max(0.0, min(100.0, value))
 
 
+def _macro_metrics(records):
+    """Macro precision/recall/F1 for closed-set student identification."""
+    labels = sorted({int(r["true_id"]) for r in records} | {int(r["pred_id"]) for r in records})
+    if not labels:
+        return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
+
+    precisions, recalls, f1s = [], [], []
+    for sid in labels:
+        tp = sum(1 for r in records if r["true_id"] == sid and r["pred_id"] == sid)
+        fp = sum(1 for r in records if r["true_id"] != sid and r["pred_id"] == sid)
+        fn = sum(1 for r in records if r["true_id"] == sid and r["pred_id"] != sid)
+        precision = tp / (tp + fp) if (tp + fp) else 0.0
+        recall = tp / (tp + fn) if (tp + fn) else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+        precisions.append(precision); recalls.append(recall); f1s.append(f1)
+    return {
+        "precision": round(float(np.mean(precisions) * 100.0), 2),
+        "recall": round(float(np.mean(recalls) * 100.0), 2),
+        "f1": round(float(np.mean(f1s) * 100.0), 2)
+    }
+
+
+def _make_lbph():
+    return cv2.face.LBPHFaceRecognizer_create(
+        radius=1, neighbors=8, grid_x=8, grid_y=8
+    )
+
+
+def _build_one_student_lbph_models(train_files):
+    """Build one-class LBPH verifier per student using ONLY 80% files."""
+    grouped = {}
+    for path, sid, filename in train_files:
+        grouped.setdefault(int(sid), []).append((path, filename))
+
+    models = {}
+    for sid, items in grouped.items():
+        faces = []
+        labels = []
+        for path, _ in items:
+            face = load_gray_face(path)
+            if face is not None:
+                faces.append(face)
+                labels.append(int(sid))
+        if not faces:
+            continue
+        try:
+            model = _make_lbph()
+            model.train(faces, np.asarray(labels, dtype=np.int32))
+            models[int(sid)] = model
+        except Exception as e:
+            print(f"[train] Same-student LBPH model failed for {sid}: {e}", flush=True)
+    return models
+
+
+def _same_student_lbph_score(model, face):
+    if model is None or face is None:
+        return 0.0, 999.0
+    pred, distance = model.predict(face)
+    return float(_lbph_score(distance)), float(distance)
+
+
 def evaluate_validation(files, arc_model=None):
     """
-    REAL 80/20 HOLD-OUT VALIDATION.
+    REAL 80/20 HOLD-OUT VALIDATION for the SAME-STUDENT comparison.
 
-    IMPORTANT:
-    - The production models may be trained on all images later.
-    - For this evaluation, each student's images are split deterministically
-      into 80% reference/training images and 20% unseen test images.
-    - LBPH is trained ONLY on the 80% reference images.
-    - ArcFace test embeddings are compared ONLY against 80% reference
-      embeddings. Test embeddings are never used as references.
-    - Hybrid is evaluated on the same unseen 20% images using the temporary
-      80%-only LBPH model plus ArcFace.
-    - The pretrained ArcFace network itself is not "fit" on these images;
-      it only converts images into embeddings.
+    Every validation image is unseen by the temporary models/references.
+    ArcFace uses only the 80% reference embeddings. LBPH uses only 80%
+    training images. Hybrid evaluates the SAME ArcFace candidate by asking a
+    one-student LBPH verifier for that exact candidate's score.
+
+    Therefore an output can be:
+        LBPH top-1: Student 08 / 94%
+        ArcFace:     Student 05 / 91%
+        LBPH for Student 05: 87%
+        Hybrid Student 05: 89.4%
+
+    LBPH's independent top-1 identity never changes the Hybrid identity.
     """
     try:
         train_files, val_files = _validation_split(files, 0.20)
     except Exception as e:
-        return {
-            "available": False,
-            "reason": f"Could not create 80/20 split: {e}"
-        }
+        return {"available": False, "reason": f"Could not create 80/20 split: {e}"}
 
     if not train_files or not val_files:
-        return {
-            "available": False,
-            "reason": "80/20 split did not produce both training and validation sets."
-        }
+        return {"available": False, "reason": "80/20 split did not produce both training and validation sets."}
 
-    # ------------------------------------------------------------------
-    # 1. Train a TEMPORARY LBPH model using ONLY the 80% training files.
-    # ------------------------------------------------------------------
+    # Temporary normal multi-class LBPH: 80% only.
     try:
-        temp_lbph = cv2.face.LBPHFaceRecognizer_create(
-            radius=1,
-            neighbors=8,
-            grid_x=8,
-            grid_y=8
-        )
-
-        lb_faces = []
-        lb_labels = []
-
-        for path, student_id, _ in train_files:
-            gray = load_gray_face(path)
-            if gray is None:
-                continue
-            lb_faces.append(gray)
-            lb_labels.append(int(student_id))
-
-        if not lb_faces:
-            return {
-                "available": False,
-                "reason": "No readable images in the 80% LBPH training split."
-            }
-
-        temp_lbph.train(
-            lb_faces,
-            np.asarray(lb_labels, dtype=np.int32)
-        )
-
-        del lb_faces
-        del lb_labels
+        temp_lbph = _make_lbph()
+        faces, labels = [], []
+        for path, sid, _ in train_files:
+            face = load_gray_face(path)
+            if face is not None:
+                faces.append(face); labels.append(int(sid))
+        if not faces:
+            return {"available": False, "reason": "No readable images in 80% LBPH training split."}
+        temp_lbph.train(faces, np.asarray(labels, dtype=np.int32))
+        del faces, labels
         gc.collect()
-
     except Exception as e:
-        return {
-            "available": False,
-            "reason": f"Temporary 80% LBPH training failed: {e}"
-        }
+        return {"available": False, "reason": f"Temporary LBPH training failed: {e}"}
 
-    # ------------------------------------------------------------------
-    # 2. Load the ArcFace embeddings produced during the single ArcFace
-    #    inference pass. Separate them by filename into 80% references and
-    #    20% unseen test embeddings.
-    # ------------------------------------------------------------------
+    # One-vs-student LBPH verifiers: 80% only.
+    same_student_models = _build_one_student_lbph_models(train_files)
+
+    # Load ArcFace embeddings generated in the single inference pass.
     try:
         db = np.load(ARC_DB, allow_pickle=False)
-
-        all_embeddings = np.asarray(
-            db["embeddings"],
-            dtype=np.float32
-        )
-
-        all_labels = np.asarray(
-            db["labels"],
-            dtype=np.int32
-        )
-
+        all_embeddings = np.asarray(db["embeddings"], dtype=np.float32)
+        all_labels = np.asarray(db["labels"], dtype=np.int32)
         if "filenames" not in db.files:
-            return {
-                "available": False,
-                "reason": "ArcFace DB has no filenames; cannot guarantee hold-out separation."
-            }
-
-        all_filenames = np.asarray(
-            db["filenames"],
-            dtype=str
-        )
-
+            return {"available": False, "reason": "ArcFace DB has no filenames; hold-out separation cannot be guaranteed."}
+        all_filenames = np.asarray(db["filenames"], dtype=str)
     except Exception as e:
-        return {
-            "available": False,
-            "reason": f"Could not load ArcFace DB: {e}"
-        }
+        return {"available": False, "reason": f"Could not load ArcFace DB: {e}"}
 
-    # Normalize defensively.
-    norms = np.linalg.norm(
-        all_embeddings,
-        axis=1,
-        keepdims=True
-    )
+    norms = np.linalg.norm(all_embeddings, axis=1, keepdims=True)
+    all_embeddings = all_embeddings / np.maximum(norms, 1e-8)
 
-    all_embeddings = (
-        all_embeddings /
-        np.maximum(norms, 1e-8)
-    )
+    train_names = {x[2] for x in train_files}
+    val_lookup = {x[2]: x for x in val_files}
+    train_mask = np.array([n in train_names for n in all_filenames], dtype=bool)
+    val_mask = np.array([n in val_lookup for n in all_filenames], dtype=bool)
 
-    train_names = {
-        item[2]
-        for item in train_files
-    }
-
-    val_names = {
-        item[2]
-        for item in val_files
-    }
-
-    train_mask = np.array(
-        [name in train_names for name in all_filenames],
-        dtype=bool
-    )
-
-    val_mask = np.array(
-        [name in val_names for name in all_filenames],
-        dtype=bool
-    )
-
-    # Only successfully embedded files can be evaluated by ArcFace.
     ref_embeddings = all_embeddings[train_mask]
     ref_labels = all_labels[train_mask]
-    ref_names = all_filenames[train_mask]
-
     test_embeddings = all_embeddings[val_mask]
     test_labels = all_labels[val_mask]
     test_names = all_filenames[val_mask]
 
-    if len(ref_embeddings) == 0:
-        return {
-            "available": False,
-            "reason": "No 80% training/reference ArcFace embeddings were available."
-        }
+    if len(ref_embeddings) == 0 or len(test_embeddings) == 0:
+        return {"available": False, "reason": "Missing 80% ArcFace references or 20% validation embeddings."}
 
-    if len(test_embeddings) == 0:
-        return {
-            "available": False,
-            "reason": "No 20% validation ArcFace embeddings were available."
-        }
+    # Predictions for all three algorithms on exactly the same validation images.
+    arc_records = []
+    lbph_records = []
+    hybrid_records = []
+    comparison_rows = []
 
-    # ------------------------------------------------------------------
-    # 3. True ArcFace hold-out accuracy:
-    #    each unseen test embedding is compared ONLY to 80% references.
-    # ------------------------------------------------------------------
-    arc_correct = 0
-    arc_total = 0
+    for emb, true_id, filename in zip(test_embeddings, test_labels, test_names):
+        filename = str(filename)
+        true_id = int(true_id)
+        similarities = np.dot(ref_embeddings, emb)
+        best_index = int(np.argmax(similarities))
+        arc_id = int(ref_labels[best_index])
+        best_similarity = float(similarities[best_index])
+        arc_conf = float(_arcface_display_score(best_similarity))
+        arc_pass = bool(best_similarity >= 0.55)
 
-    # Keep a lookup so the hybrid loop can find the ArcFace result by filename.
-    arc_predictions = {}
-
-    for emb, true_id, filename in zip(
-        test_embeddings,
-        test_labels,
-        test_names
-    ):
-        # Cosine similarity because embeddings are normalized.
-        similarities = np.dot(
-            ref_embeddings,
-            emb
-        )
-
-        best_index = int(
-            np.argmax(similarities)
-        )
-
-        best_similarity = float(
-            similarities[best_index]
-        )
-
-        predicted_id = int(
-            ref_labels[best_index]
-        )
-
-        arc_confidence = _arcface_display_score(
-            best_similarity
-        )
-
-        # Same raw ArcFace threshold used by the server by default.
-        arc_matched = bool(
-            best_similarity >= 0.55
-        )
-
-        arc_correct += int(
-            arc_matched and predicted_id == int(true_id)
-        )
-
-        arc_total += 1
-
-        arc_predictions[str(filename)] = {
-            "id": predicted_id,
-            "true_id": int(true_id),
-            "similarity": best_similarity,
-            "confidence": arc_confidence,
-            "matched": arc_matched
-        }
-
-    # ------------------------------------------------------------------
-    # 4. True LBPH hold-out accuracy using ONLY the temporary 80%-trained
-    #    recognizer.
-    # ------------------------------------------------------------------
-    lbph_correct = 0
-    lbph_total = 0
-    lbph_predictions = {}
-
-    val_lookup = {
-        item[2]: item
-        for item in val_files
-    }
-
-    for filename in sorted(val_lookup):
-        path, true_id, _ = val_lookup[filename]
-
-        try:
-            gray = load_gray_face(path)
-            if gray is None:
-                continue
-
-            predicted_id, distance = temp_lbph.predict(
-                gray
-            )
-
-            lbph_confidence = _lbph_score(
-                distance
-            )
-
-            # Current attendance threshold shown by your server is 80%.
-            lbph_matched = bool(
-                lbph_confidence >= 80.0
-            )
-
-            lbph_correct += int(
-                lbph_matched and int(predicted_id) == int(true_id)
-            )
-
-            lbph_total += 1
-
-            lbph_predictions[filename] = {
-                "id": int(predicted_id),
-                "true_id": int(true_id),
-                "confidence": float(lbph_confidence),
-                "distance": float(distance),
-                "matched": lbph_matched
-            }
-
-        except Exception:
+        path, _, _ = val_lookup[filename]
+        face = load_gray_face(path)
+        if face is None:
             continue
 
-    # ------------------------------------------------------------------
-    # 5. True Hybrid hold-out accuracy.
-    #
-    # Match the deployed Hybrid concept:
-    #   - ArcFace is primary.
-    #   - LBPH is secondary.
-    #   - If both agree and both pass, fuse 75% ArcFace + 25% LBPH.
-    #   - If they disagree, require a stronger ArcFace signal and use the
-    #     same 85/15 confidence fusion.
-    #   - Hybrid acceptance threshold = 80%.
-    # ------------------------------------------------------------------
-    hybrid_correct = 0
-    hybrid_total = 0
-    hybrid_accepted = 0
-    hybrid_agreement = 0
+        # Independent LBPH top-1.
+        lb_top_id, lb_dist = temp_lbph.predict(face)
+        lb_top_id = int(lb_top_id)
+        lb_top_conf = float(_lbph_score(lb_dist))
+        lb_pass = bool(lb_top_conf >= 80.0)
 
-    for filename, arc in arc_predictions.items():
-        lbph = lbph_predictions.get(filename)
+        # LBPH score FOR THE SAME STUDENT selected by ArcFace.
+        verifier = same_student_models.get(arc_id)
+        same_conf, same_dist = _same_student_lbph_score(verifier, face)
 
-        if lbph is None:
-            continue
-
-        arc_id = int(arc["id"])
-        lbph_id = int(lbph["id"])
-
-        arc_similarity = float(
-            arc["similarity"]
+        # Hybrid uses the SAME candidate identity (ArcFace candidate).
+        hybrid_score = round(max(0.0, min(99.9, 0.60 * arc_conf + 0.40 * same_conf)), 1)
+        hybrid_id = arc_id if arc_pass else -1
+        hybrid_pass = bool(
+            arc_pass and verifier is not None and
+            arc_conf >= 80.0 and same_conf >= 80.0 and hybrid_score >= 80.0
         )
-        arc_confidence = float(
-            arc["confidence"]
-        )
-        lbph_confidence = float(
-            lbph["confidence"]
-        )
+        hybrid_pred = hybrid_id if hybrid_pass else -1
 
-        arc_pass = bool(
-            arc["matched"] and arc_id > 0
-        )
+        arc_pred = arc_id if arc_pass else -1
+        lb_pred = lb_top_id if lb_pass else -1
 
-        lbph_pass = bool(
-            lbph["matched"] and lbph_id > 0
-        )
+        arc_records.append({"true_id": true_id, "pred_id": arc_pred})
+        lbph_records.append({"true_id": true_id, "pred_id": lb_pred})
+        hybrid_records.append({"true_id": true_id, "pred_id": hybrid_pred})
 
-        true_id = int(
-            arc["true_id"]
-        )
+        comparison_rows.append({
+            "filename": filename,
+            "true_student": true_id,
+            "lbph_top1_id": lb_top_id,
+            "lbph_top1_confidence": round(lb_top_conf, 1),
+            "arcface_id": arc_id,
+            "arcface_confidence": round(arc_conf, 1),
+            "lbph_same_student_confidence": round(same_conf, 1),
+            "hybrid_id": hybrid_id,
+            "hybrid_confidence": hybrid_score,
+            "hybrid_accepted": hybrid_pass,
+            "lbph_agrees_with_arcface": bool(lb_top_id == arc_id),
+            "lbph_same_student_distance": round(same_dist, 4)
+        })
 
-        if not arc_pass:
-            hybrid_id = -1
-            hybrid_score = arc_confidence
-            hybrid_matched = False
+    if not comparison_rows:
+        return {"available": False, "reason": "No validation images could be evaluated."}
 
-        elif lbph_pass and lbph_id == arc_id:
-            hybrid_id = arc_id
+    def accuracy(records):
+        return round(sum(r["pred_id"] == r["true_id"] for r in records) / len(records) * 100.0, 2)
 
-            hybrid_score = (
-                arc_confidence * 0.75
-                + lbph_confidence * 0.25
-            )
+    hybrid_accepted = sum(1 for r in comparison_rows if r["hybrid_accepted"])
+    agreements = sum(1 for r in comparison_rows if r["lbph_agrees_with_arcface"])
 
-            hybrid_matched = bool(
-                hybrid_score >= 80.0
-            )
-
-            hybrid_agreement += 1
-
-        else:
-            # Same concept as the deployed server:
-            # disagreement requires a stronger ArcFace similarity.
-            strong_arc = bool(
-                arc_similarity >= 0.63
-            )
-
-            hybrid_id = arc_id
-
-            hybrid_score = (
-                arc_confidence * 0.85
-                + lbph_confidence * 0.15
-            )
-
-            hybrid_matched = bool(
-                strong_arc
-                and hybrid_score >= 80.0
-            )
-
-        hybrid_total += 1
-
-        if hybrid_matched:
-            hybrid_accepted += 1
-
-        hybrid_correct += int(
-            hybrid_matched
-            and hybrid_id == true_id
-        )
-
-    # ------------------------------------------------------------------
-    # 6. Report the REAL numbers.
-    # ------------------------------------------------------------------
     result = {
         "available": True,
-        "validation_type": "proper_80_20_holdout",
+        "validation_type": "proper_80_20_same_student_holdout",
         "split_ratio": "80/20",
         "total_images": len(files),
         "training_images": len(train_files),
-        "validation_images": len(val_files),
-
-        "lbph_validation_images": lbph_total,
-        "lbph_correct": lbph_correct,
-        "lbph_incorrect": max(0, lbph_total - lbph_correct),
-        "lbph_accuracy": round(
-            lbph_correct / max(1, lbph_total) * 100.0,
-            1
-        ),
-
-        "arcface_validation_images": arc_total,
-        "arcface_correct": arc_correct,
-        "arcface_incorrect": max(0, arc_total - arc_correct),
-        "arcface_accuracy": round(
-            arc_correct / max(1, arc_total) * 100.0,
-            1
-        ),
-
-        "hybrid_validation_images": hybrid_total,
-        "hybrid_correct": hybrid_correct,
-        "hybrid_incorrect": max(0, hybrid_total - hybrid_correct),
-        "hybrid_accuracy": round(
-            hybrid_correct / max(1, hybrid_total) * 100.0,
-            1
-        ),
-
-        "hybrid_acceptance_rate": round(
-            hybrid_accepted / max(1, hybrid_total) * 100.0,
-            1
-        ),
-
-        "hybrid_agreement_rate": round(
-            hybrid_agreement / max(1, hybrid_total) * 100.0,
-            1
-        ),
-
-        "arcface_reference_images": len(ref_embeddings),
-        "arcface_test_embeddings": len(test_embeddings),
+        "validation_images": len(comparison_rows),
+        "lbph_validation_images": len(lbph_records),
+        "arcface_validation_images": len(arc_records),
+        "hybrid_validation_images": len(hybrid_records),
+        "lbph_accuracy": accuracy(lbph_records),
+        "arcface_accuracy": accuracy(arc_records),
+        "hybrid_accuracy": accuracy(hybrid_records),
+        "lbph_metrics": _macro_metrics(lbph_records),
+        "arcface_metrics": _macro_metrics(arc_records),
+        "hybrid_metrics": _macro_metrics(hybrid_records),
+        "hybrid_acceptance_rate": round(hybrid_accepted / len(comparison_rows) * 100.0, 2),
+        "hybrid_agreement_rate": round(agreements / len(comparison_rows) * 100.0, 2),
+        "hybrid_weights": {"arcface": 0.60, "lbph_same_student": 0.40},
+        "thresholds": {"arcface_similarity": 0.55, "lbph_confidence": 80.0, "hybrid_confidence": 80.0},
         "method_note": (
-            "Validation images were excluded from LBPH training and "
-            "from the ArcFace reference database."
-        )
+            "All three algorithms were evaluated on the same unseen 20% images. "
+            "Hybrid uses the ArcFace candidate and LBPH score for that exact same student; "
+            "LBPH top-1 cannot replace the Hybrid identity."
+        ),
+        "comparison_samples": comparison_rows[:100]
     }
 
-    # Explicit cleanup for Render's 512 MB limit.
-    del all_embeddings
-    del all_labels
-    del all_filenames
-    del ref_embeddings
-    del ref_labels
-    del test_embeddings
-    del test_labels
-    del temp_lbph
-    gc.collect()
+    # Print a concise thesis-ready comparison.
+    print("==================================================", flush=True)
+    print("PROPER 80/20 SAME-STUDENT HOLD-OUT COMPARISON", flush=True)
+    print("==================================================", flush=True)
+    print(f"Training images:   {len(train_files)}", flush=True)
+    print(f"Validation images: {len(comparison_rows)}", flush=True)
+    for name, acc, met in [
+        ("LBPH", result["lbph_accuracy"], result["lbph_metrics"]),
+        ("ArcFace", result["arcface_accuracy"], result["arcface_metrics"]),
+        ("Hybrid", result["hybrid_accuracy"], result["hybrid_metrics"]),
+    ]:
+        print(f"{name}: Accuracy {acc:.2f}% | Precision {met['precision']:.2f}% | Recall {met['recall']:.2f}% | F1 {met['f1']:.2f}%", flush=True)
+    print(f"Hybrid acceptance rate: {result['hybrid_acceptance_rate']:.2f}%", flush=True)
+    print(f"LBPH/ArcFace agreement: {result['hybrid_agreement_rate']:.2f}%", flush=True)
+    print("==================================================", flush=True)
 
+    del all_embeddings, all_labels, all_filenames
+    del ref_embeddings, ref_labels, test_embeddings, test_labels
+    del temp_lbph, same_student_models
+    gc.collect()
     return result
 
 def _arcface_align_from_validation_crop(face_color):
@@ -1488,7 +1333,7 @@ def main():
                 f"Validation accuracy — "
                 f"LBPH {validation['lbph_accuracy']:.1f}% | "
                 f"ArcFace {validation['arcface_accuracy']:.1f}% | "
-                f"Hybrid {validation['hybrid_accuracy']:.1f}% at 80% threshold."
+                f"Hybrid {validation['hybrid_accuracy']:.1f}% using proper 80/20 same-student hold-out evaluation."
             )
         else:
             final_message = "Training completed. Proper 80/20 hold-out validation was unavailable."
