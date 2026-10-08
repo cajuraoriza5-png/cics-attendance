@@ -40,6 +40,7 @@ import json
 import time
 import traceback
 import re
+import hashlib
 from collections import Counter
 
 import cv2
@@ -662,6 +663,320 @@ def train_arcface(files, model):
     }
 
 
+
+# =============================================================================
+# VALIDATION / ACCURACY
+# =============================================================================
+
+def _validation_split(files, validation_ratio=0.20):
+    """
+    Create a deterministic per-student validation split.
+
+    This is NOT training accuracy. Validation images are excluded from the
+    temporary validation models/references so the reported accuracy is a
+    better estimate of recognition performance on unseen enrolled images.
+    """
+    grouped = {}
+    for item in files:
+        grouped.setdefault(item[1], []).append(item)
+
+    train_files = []
+    val_files = []
+
+    for student_id, items in sorted(grouped.items()):
+        items = sorted(items, key=lambda x: x[2].lower())
+
+        if len(items) < 2:
+            train_files.extend(items)
+            continue
+
+        val_count = max(1, int(round(len(items) * validation_ratio)))
+        if len(items) - val_count < 1:
+            val_count = len(items) - 1
+
+        # Deterministic ordering avoids changing the metric on every retrain.
+        ranked = sorted(
+            items,
+            key=lambda x: hashlib.sha256(x[2].encode("utf-8")).hexdigest()
+        )
+        val_set = {x[2] for x in ranked[:val_count]}
+
+        for item in items:
+            if item[2] in val_set:
+                val_files.append(item)
+            else:
+                train_files.append(item)
+
+    return train_files, val_files
+
+
+def _prepare_arcface_embedding(path, cascade):
+    image = cv2.imread(path, cv2.IMREAD_COLOR)
+    if image is None:
+        return None
+
+    gray = cv2.equalizeHist(
+        cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    )
+
+    boxes = cascade.detectMultiScale(
+        gray, 1.10, 4, minSize=(40, 40)
+    )
+
+    if len(boxes) == 0:
+        boxes = cascade.detectMultiScale(
+            gray, 1.05, 3, minSize=(30, 30)
+        )
+
+    if len(boxes) == 0:
+        return None
+
+    x, y, w, h = max(boxes, key=lambda r: r[2] * r[3])
+
+    px, py = int(w * 0.12), int(h * 0.12)
+    x1, y1 = max(0, x - px), max(0, y - py)
+    x2, y2 = min(image.shape[1], x + w + px), min(image.shape[0], y + h + py)
+
+    aligned = align_for_arcface(image[y1:y2, x1:x2])
+    return aligned
+
+
+def _lbph_score(distance):
+    raw = (1.0 - float(distance) / 150.0) * 100.0
+    return max(0.0, min(100.0, raw + 35.0))
+
+
+def _arcface_display_score(similarity):
+    value = ((float(similarity) + 1.0) / 2.0) * 100.0
+    return max(0.0, min(100.0, value))
+
+
+def evaluate_validation(files, arc_model):
+    """
+    Evaluate LBPH, ArcFace, and the same Hybrid decision concept on held-out
+    validation images.
+
+    The validation set is never used to train the temporary LBPH model or
+    populate the temporary ArcFace reference embeddings.
+    """
+    train_files, val_files = _validation_split(files)
+
+    if not train_files or not val_files:
+        return {
+            "available": False,
+            "reason": "Not enough images for a validation split."
+        }
+
+    # ---------------------------
+    # Temporary LBPH validation model
+    # ---------------------------
+    lb_faces = []
+    lb_labels = []
+
+    for path, sid, _ in train_files:
+        image = load_gray_face(path)
+        if image is not None:
+            lb_faces.append(image)
+            lb_labels.append(sid)
+
+    lb_model = None
+    if lb_faces and len(set(lb_labels)) >= 2:
+        lb_model = cv2.face.LBPHFaceRecognizer_create(
+            radius=1, neighbors=8, grid_x=8, grid_y=8
+        )
+        lb_model.train(
+            lb_faces,
+            np.asarray(lb_labels, dtype=np.int32)
+        )
+
+    # ---------------------------
+    # Temporary ArcFace references
+    # ---------------------------
+    cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    )
+
+    arc_refs = []
+    arc_labels = []
+
+    for path, sid, _ in train_files:
+        try:
+            aligned = _prepare_arcface_embedding(path, cascade)
+            if aligned is None:
+                continue
+
+            feat = arc_model.get_feat([aligned])
+            emb = normalize_embedding(feat[0])
+            if emb is not None:
+                arc_refs.append(emb)
+                arc_labels.append(sid)
+        except Exception:
+            continue
+
+    if not arc_refs:
+        return {
+            "available": False,
+            "reason": "Could not generate validation ArcFace references."
+        }
+
+    arc_refs = np.asarray(arc_refs, dtype=np.float32)
+    arc_labels = np.asarray(arc_labels, dtype=np.int32)
+
+    total = 0
+    lb_correct = 0
+    arc_correct = 0
+    hybrid_correct = 0
+    consensus_count = 0
+    hybrid_accepted = 0
+    hybrid_accepted_correct = 0
+    validation_hybrid_threshold = float(os.environ.get("HYBRID_THRESHOLD", "80.0"))
+
+    for path, true_id, filename in val_files:
+        try:
+            image = cv2.imread(path, cv2.IMREAD_COLOR)
+            if image is None:
+                continue
+
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            gray_eq = cv2.equalizeHist(gray)
+
+            boxes = cascade.detectMultiScale(
+                gray_eq, 1.10, 5, minSize=(40, 40)
+            )
+            if len(boxes) == 0:
+                boxes = cascade.detectMultiScale(
+                    gray_eq, 1.05, 3, minSize=(30, 30)
+                )
+            if len(boxes) == 0:
+                continue
+
+            x, y, w, h = max(boxes, key=lambda r: r[2] * r[3])
+            px, py = int(w * 0.12), int(h * 0.12)
+            x1, y1 = max(0, x - px), max(0, y - py)
+            x2, y2 = min(image.shape[1], x + w + px), min(image.shape[0], y + h + py)
+
+            face_color = image[y1:y2, x1:x2]
+            face_roi = cv2.resize(
+                cv2.cvtColor(face_color, cv2.COLOR_BGR2GRAY),
+                (100, 100),
+                interpolation=cv2.INTER_AREA
+            )
+            face_roi = cv2.equalizeHist(face_roi)
+
+            # LBPH
+            lb_id = -1
+            lb_conf = 0.0
+            if lb_model is not None:
+                pred_id, dist = lb_model.predict(face_roi)
+                lb_id = int(pred_id)
+                lb_conf = _lbph_score(dist)
+
+            # ArcFace
+            aligned = _arcface_align_from_validation_crop(face_color)
+            if aligned is None:
+                continue
+
+            feat = arc_model.get_feat([aligned])
+            query_emb = normalize_embedding(feat[0])
+            if query_emb is None:
+                continue
+
+            sims = np.dot(arc_refs, query_emb)
+            best_index = int(np.argmax(sims))
+            arc_id = int(arc_labels[best_index])
+            best_sim = float(sims[best_index])
+
+            same_student = np.where(arc_labels == arc_id)[0]
+            top_values = sorted(
+                [float(sims[i]) for i in same_student],
+                reverse=True
+            )[:5]
+            representative = (
+                float(np.mean(top_values))
+                if top_values else best_sim
+            )
+            arc_conf = _arcface_display_score(representative)
+
+            # Raw top-1 model accuracy
+            total += 1
+            if lb_id == true_id:
+                lb_correct += 1
+            if arc_id == true_id:
+                arc_correct += 1
+
+            # Hybrid mirrors the current server's score-fusion concept.
+            if lb_id > 0 and arc_id > 0 and lb_id == arc_id:
+                weighted = arc_conf * 0.65 + lb_conf * 0.35
+                bonus = min(10.0, min(arc_conf, lb_conf) * 0.10)
+                hybrid_conf = min(99.9, weighted + bonus)
+                hybrid_id = arc_id
+                consensus_count += 1
+            elif lb_id > 0 and arc_id > 0:
+                if arc_conf >= lb_conf:
+                    hybrid_id = arc_id
+                    primary, secondary = arc_conf, lb_conf
+                else:
+                    hybrid_id = lb_id
+                    primary, secondary = lb_conf, arc_conf
+
+                margin = max(0.0, primary - secondary)
+                hybrid_conf = primary * 0.80 + secondary * 0.20
+                hybrid_conf += min(8.0, margin * 0.35)
+                hybrid_conf = min(99.9, max(0.0, hybrid_conf))
+            elif arc_id > 0:
+                hybrid_id = arc_id
+                hybrid_conf = arc_conf * 0.90
+            elif lb_id > 0:
+                hybrid_id = lb_id
+                hybrid_conf = lb_conf * 0.90
+            else:
+                hybrid_id = -1
+                hybrid_conf = 0.0
+
+            if hybrid_id == true_id:
+                hybrid_correct += 1
+
+            if hybrid_conf >= validation_hybrid_threshold:
+                hybrid_accepted += 1
+                if hybrid_id == true_id:
+                    hybrid_accepted_correct += 1
+
+        except Exception as e:
+            print(
+                f"[train] Validation skipped {filename}: {e}",
+                flush=True
+            )
+
+    if total == 0:
+        return {
+            "available": False,
+            "reason": "No validation images could be evaluated."
+        }
+
+    return {
+        "available": True,
+        "validation_images": total,
+        "training_images": len(train_files),
+        "students": len(set(x[1] for x in val_files)),
+        "lbph_accuracy": round(lb_correct / total * 100.0, 1),
+        "arcface_accuracy": round(arc_correct / total * 100.0, 1),
+        "hybrid_accuracy": round(hybrid_correct / total * 100.0, 1),
+        "hybrid_consensus_rate": round(consensus_count / total * 100.0, 1),
+        "hybrid_acceptance_rate": round(hybrid_accepted / total * 100.0, 1),
+        "hybrid_accepted_correct_rate": round(
+            hybrid_accepted_correct / hybrid_accepted * 100.0, 1
+        ) if hybrid_accepted else 0.0
+    }
+
+
+def _arcface_align_from_validation_crop(face_color):
+    """
+    Same alignment used by training, kept as a separate helper so validation
+    uses exactly the same ArcFace preprocessing.
+    """
+    return align_for_arcface(face_color)
+
+
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -750,12 +1065,73 @@ def main():
             files
         )
 
+        # Hold-out validation is reported separately from training accuracy.
+        # This gives a more meaningful estimate of recognition performance.
+        update_status(
+            "running",
+            "LBPH completed. Preparing validation accuracy...",
+            34,
+            {
+                "lbph": lbph_result
+            }
+        )
+
+        lbph_validation = None
+        try:
+            _, val_files_preview = _validation_split(files)
+            if val_files_preview:
+                # A temporary ArcFace model is not needed yet; calculate LBPH
+                # validation directly with a temporary held-out model.
+                train_val_files, val_only = _validation_split(files)
+                vf, vl = [], []
+                for vpath, vsid, _ in train_val_files:
+                    img = load_gray_face(vpath)
+                    if img is not None:
+                        vf.append(img)
+                        vl.append(vsid)
+                temp_lb = None
+                if vf and len(set(vl)) >= 2:
+                    temp_lb = cv2.face.LBPHFaceRecognizer_create(
+                        radius=1, neighbors=8, grid_x=8, grid_y=8
+                    )
+                    temp_lb.train(vf, np.asarray(vl, dtype=np.int32))
+
+                correct = total = 0
+                for vpath, vsid, _ in val_only:
+                    img = load_gray_face(vpath)
+                    if img is None or temp_lb is None:
+                        continue
+                    pred, _ = temp_lb.predict(img)
+                    total += 1
+                    correct += int(int(pred) == int(vsid))
+
+                if total:
+                    lbph_validation = {
+                        "accuracy": round(correct / total * 100.0, 1),
+                        "validation_images": total
+                    }
+                    update_status(
+                        "running",
+                        f"LBPH validation accuracy: {lbph_validation['accuracy']:.1f}%",
+                        35,
+                        {
+                            "lbph": lbph_result,
+                            "accuracy": {"lbph": lbph_validation}
+                        }
+                    )
+        except Exception as validation_error:
+            print(
+                f"[train] LBPH validation warning: {validation_error}",
+                flush=True
+            )
+
         update_status(
             "running",
             "LBPH completed. Loading ArcFace...",
-            35,
+            36,
             {
-                "lbph": lbph_result
+                "lbph": lbph_result,
+                "accuracy": {"lbph": lbph_validation} if lbph_validation else {}
             }
         )
 
@@ -769,6 +1145,47 @@ def main():
             files,
             arc_model
         )
+
+        # Validate all three recognition decisions on held-out images.
+        update_status(
+            "running",
+            "ArcFace embeddings completed. Measuring validation accuracy...",
+            88,
+            {
+                "lbph": lbph_result,
+                "arcface": arc_result
+            }
+        )
+
+        validation = evaluate_validation(files, arc_model)
+
+        if validation.get("available"):
+            update_status(
+                "running",
+                (
+                    f"Validation accuracy — "
+                    f"LBPH: {validation['lbph_accuracy']:.1f}% | "
+                    f"ArcFace: {validation['arcface_accuracy']:.1f}% | "
+                    f"Hybrid: {validation['hybrid_accuracy']:.1f}%"
+                ),
+                91,
+                {
+                    "lbph": lbph_result,
+                    "arcface": arc_result,
+                    "accuracy": validation
+                }
+            )
+        else:
+            update_status(
+                "running",
+                "Validation accuracy unavailable: " + validation.get("reason", "unknown reason"),
+                91,
+                {
+                    "lbph": lbph_result,
+                    "arcface": arc_result,
+                    "accuracy": validation
+                }
+            )
 
         # ---------------------------------------------------------
         # Hybrid
@@ -804,6 +1221,7 @@ def main():
             "lbph": lbph_result,
             "arcface": arc_result,
             "hybrid": hybrid_result,
+            "accuracy": validation,
             "samples": len(files),
             "students": len(counts),
             "samples_per_student": dict(
@@ -818,12 +1236,20 @@ def main():
                 "were not created."
             )
 
+        if validation.get("available"):
+            final_message = (
+                "Training completed. "
+                f"Validation accuracy — "
+                f"LBPH {validation['lbph_accuracy']:.1f}% | "
+                f"ArcFace {validation['arcface_accuracy']:.1f}% | "
+                f"Hybrid {validation['hybrid_accuracy']:.1f}%."
+            )
+        else:
+            final_message = "Training completed. Validation accuracy was unavailable."
+
         update_status(
             "done",
-            (
-                "LBPH, ArcFace and Hybrid "
-                "training completed."
-            ),
+            final_message,
             100,
             result
         )
