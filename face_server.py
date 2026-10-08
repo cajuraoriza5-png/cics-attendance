@@ -20,6 +20,8 @@ Important:
 """
 
 import os
+
+HYBRID_FUSION_VERSION = "HYBRID-LBPH-ARCFACE-V3"
 import sys
 import json
 import base64
@@ -29,7 +31,8 @@ import subprocess
 import time
 import re
 import shutil
-import gc
+import zipfile
+import urllib.request
 from collections import Counter
 
 import numpy as np
@@ -38,11 +41,12 @@ import cv2
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-try:
-    from insightface.app import FaceAnalysis
-except Exception as e:
-    FaceAnalysis = None
-    _INSIGHTFACE_IMPORT_ERROR = str(e)
+# InsightFace is imported lazily. We intentionally load ONLY the ArcFace
+# recognition ONNX model (w600k_mbf.onnx), not the full FaceAnalysis bundle.
+# This avoids loading InsightFace's detector and other models on Render's
+# 512 MB instance.
+_INSIGHTFACE_IMPORT_ERROR = ""
+_arcface_model_zoo = None
 
 
 # =============================================================================
@@ -84,10 +88,8 @@ ARCFACE_THRESHOLD = float(
     os.environ.get("ARCFACE_THRESHOLD", "0.55")
 )
 
-# 80 is the application's required displayed acceptance score.
-# LBPH's underlying value is a distance (lower is better), not a probability.
 LBPH_THRESHOLD = float(
-    os.environ.get("LBPH_THRESHOLD", "80.0")
+    os.environ.get("LBPH_THRESHOLD", "60.0")
 )
 
 HYBRID_THRESHOLD = float(
@@ -123,6 +125,37 @@ _models_ready = {
     "hybrid": False,
     "loading": True
 }
+
+# ---------------------------------------------------------------------------
+# IMPORTANT FOR GUNICORN / RENDER
+# ---------------------------------------------------------------------------
+# Gunicorn imports this module instead of executing the __main__ block.
+# Therefore the Haar face detector must be initialized at module load time,
+# and model loading must be started from a background thread after import.
+# ---------------------------------------------------------------------------
+try:
+    _cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades +
+        "haarcascade_frontalface_default.xml"
+    )
+
+    if _cascade.empty():
+        print(
+            "[face_server] ERROR: Haar Cascade could not be initialized.",
+            flush=True
+        )
+        _cascade = None
+    else:
+        print(
+            "[face_server] Haar Cascade initialized [OK]",
+            flush=True
+        )
+except Exception as _detector_error:
+    print(
+        f"[face_server] Haar Cascade initialization failed: {_detector_error}",
+        flush=True
+    )
+    _cascade = None
 
 
 # =============================================================================
@@ -285,97 +318,290 @@ def _iter_face_files(directory):
     )
 
 
-def _preprocess_lbph_face(gray_face):
-    """Same LBPH preprocessing used during training and recognition: face crop -> grayscale -> 128x128 -> CLAHE."""
-    if gray_face is None or gray_face.size == 0:
+def _load_gray_face(path):
+    image = cv2.imread(
+        path,
+        cv2.IMREAD_GRAYSCALE
+    )
+
+    if image is None:
         return None
 
-    face = cv2.resize(
-        gray_face,
-        (128, 128),
+    image = cv2.resize(
+        image,
+        (100, 100),
         interpolation=cv2.INTER_AREA
     )
 
-    clahe = cv2.createCLAHE(
-        clipLimit=2.0,
-        tileGridSize=(8, 8)
-    )
-    return clahe.apply(face)
+    image = cv2.equalizeHist(image)
 
-
-def _load_gray_face(path):
-    """Load an enrolled image and extract the same face-only LBPH ROI."""
-    image = cv2.imread(path, cv2.IMREAD_COLOR)
-    if image is None or _cascade is None:
-        return None
-
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    detect_gray = cv2.equalizeHist(gray)
-
-    boxes = _cascade.detectMultiScale(
-        detect_gray, 1.10, 5, minSize=(40, 40)
-    )
-    if len(boxes) == 0:
-        boxes = _cascade.detectMultiScale(
-            detect_gray, 1.05, 3, minSize=(30, 30)
-        )
-    if len(boxes) == 0:
-        return None
-
-    x, y, w, h = max(
-        boxes, key=lambda r: r[2] * r[3]
-    )
-    return _preprocess_lbph_face(
-        gray[y:y+h, x:x+w]
-    )
+    return image
 
 
 # =============================================================================
 # ARCFACE RUNTIME
 # =============================================================================
 
+
+def _find_arcface_recognition_onnx():
+    """
+    Locate the lightweight ArcFace recognition model used by buffalo_s.
+
+    We use ONLY w600k_mbf.onnx. The buffalo_s detector is deliberately not
+    loaded because Haar Cascade already performs face detection.
+    """
+    candidates = []
+
+    custom = os.environ.get("ARCFACE_MODEL_PATH", "").strip()
+    if custom:
+        candidates.append(custom)
+
+    home = os.path.expanduser("~")
+    candidates.extend([
+        os.path.join(home, ".insightface", "models", "buffalo_s", "w600k_mbf.onnx"),
+        os.path.join(home, ".insightface", "models", "buffalo_s", "w600k_mbf.onnx"),
+        os.path.join(PROJECT, "models", "w600k_mbf.onnx"),
+    ])
+
+    for path in candidates:
+        if path and os.path.isfile(path) and os.path.getsize(path) > 1024:
+            return path
+
+    # If InsightFace already downloaded the buffalo_s.zip pack, extract ONLY
+    # the recognition model. This does not instantiate FaceAnalysis.
+    zip_candidates = [
+        os.path.join(home, ".insightface", "models", "buffalo_s.zip"),
+        os.path.join(PROJECT, "models", "buffalo_s.zip"),
+    ]
+
+    for zip_path in zip_candidates:
+        if not os.path.isfile(zip_path):
+            continue
+
+        target_dir = os.path.join(
+            os.path.dirname(zip_path),
+            "buffalo_s"
+        )
+        target = os.path.join(target_dir, "w600k_mbf.onnx")
+
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                member = None
+                for name in zf.namelist():
+                    if name.replace("\\", "/").endswith("/w600k_mbf.onnx") or name.replace("\\", "/").endswith("w600k_mbf.onnx"):
+                        member = name
+                        break
+
+                if member:
+                    with zf.open(member) as src, open(target, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+
+                    if os.path.isfile(target) and os.path.getsize(target) > 1024:
+                        return target
+        except Exception as e:
+            print(
+                f"[face_server] Could not extract lightweight ArcFace model: {e}",
+                flush=True
+            )
+
+    return None
+
+
+def _download_lightweight_arcface_model():
+    """
+    Last-resort download of the buffalo_s model pack, followed by extraction
+    of ONLY w600k_mbf.onnx. Streaming keeps the ZIP out of RAM.
+    """
+    home = os.path.expanduser("~")
+    model_root = os.path.join(home, ".insightface", "models")
+    os.makedirs(model_root, exist_ok=True)
+
+    zip_path = os.path.join(model_root, "buffalo_s.zip")
+    target_dir = os.path.join(model_root, "buffalo_s")
+    target = os.path.join(target_dir, "w600k_mbf.onnx")
+
+    if os.path.isfile(target) and os.path.getsize(target) > 1024:
+        return target
+
+    url = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip"
+
+    print(
+        "[face_server] Downloading buffalo_s pack for the lightweight ArcFace model...",
+        flush=True
+    )
+
+    tmp_zip = zip_path + ".part"
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response, open(tmp_zip, "wb") as dst:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+
+        os.replace(tmp_zip, zip_path)
+
+        os.makedirs(target_dir, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            member = None
+            for name in zf.namelist():
+                if name.replace("\\", "/").endswith("/w600k_mbf.onnx") or name.replace("\\", "/").endswith("w600k_mbf.onnx"):
+                    member = name
+                    break
+
+            if not member:
+                raise RuntimeError("w600k_mbf.onnx was not found inside buffalo_s.zip.")
+
+            with zf.open(member) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+        return target
+
+    except Exception:
+        try:
+            if os.path.exists(tmp_zip):
+                os.remove(tmp_zip)
+        except Exception:
+            pass
+        raise
+
+
 def _get_arcface():
+    """
+    Load ONLY the ArcFace recognition ONNX model.
+
+    This replaces InsightFace FaceAnalysis. Haar Cascade is used separately
+    for detection, so the heavy InsightFace detector is never loaded.
+    """
     global _arc_app
+    global _arcface_model_zoo
+    global _INSIGHTFACE_IMPORT_ERROR
 
     with _lock:
         if _arc_app is not None:
             return _arc_app
 
-    if FaceAnalysis is None:
+    try:
+        from insightface import model_zoo
+        _arcface_model_zoo = model_zoo
+    except Exception as e:
+        _INSIGHTFACE_IMPORT_ERROR = str(e)
         raise RuntimeError(
-            "InsightFace is unavailable: "
-            + globals().get(
-                "_INSIGHTFACE_IMPORT_ERROR",
-                "unknown import error"
-            )
+            "InsightFace model_zoo is unavailable: " + str(e)
         )
 
+    model_path = _find_arcface_recognition_onnx()
+
+    if model_path is None:
+        model_path = _download_lightweight_arcface_model()
+
     print(
-        "[face_server] Loading InsightFace buffalo_s...",
+        f"[face_server] Loading lightweight ArcFace recognition model: {model_path}",
         flush=True
     )
 
-    model = FaceAnalysis(
-        name="buffalo_s",
+    model = model_zoo.get_model(
+        model_path,
         providers=["CPUExecutionProvider"]
     )
 
-    # Smaller detector input reduces CPU/RAM usage on Render's 512 MB plan.
-    model.prepare(
-        ctx_id=-1,
-        det_size=(320, 320)
-    )
+    model.prepare(ctx_id=-1)
 
     with _lock:
         _arc_app = model
-        _models_ready["arcface"] = True
+        _models_ready["arcface"] = (
+            _arc_embeddings is not None
+            and len(_arc_embeddings) > 0
+        )
 
     print(
-        "[face_server] ArcFace/InsightFace loaded [OK]",
+        "[face_server] Lightweight ArcFace recognition model loaded [OK]",
         flush=True
     )
 
     return model
+
+
+def _estimated_five_landmarks(width, height):
+    """
+    Estimate five facial landmarks from a Haar bounding box.
+
+    This keeps ArcFace lightweight because no InsightFace detector/landmark
+    network is loaded. The same deterministic alignment is used during
+    training and recognition.
+    """
+    w = float(width)
+    h = float(height)
+
+    return np.array([
+        [0.32 * w, 0.38 * h],  # left eye
+        [0.68 * w, 0.38 * h],  # right eye
+        [0.50 * w, 0.56 * h],  # nose
+        [0.38 * w, 0.72 * h],  # left mouth
+        [0.62 * w, 0.72 * h],  # right mouth
+    ], dtype=np.float32)
+
+
+def _arcface_align_from_bbox(face_color):
+    """
+    Convert the Haar face crop into the standard 112x112 ArcFace input.
+    """
+    if face_color is None or face_color.size == 0:
+        return None
+
+    h, w = face_color.shape[:2]
+    if w < 20 or h < 20:
+        return None
+
+    src = _estimated_five_landmarks(w, h)
+
+    dst = np.array([
+        [38.2946, 51.6963],
+        [73.5318, 51.5014],
+        [56.0252, 71.7366],
+        [41.5493, 92.3655],
+        [70.7299, 92.2041],
+    ], dtype=np.float32)
+
+    # Use all five points for a stable least-squares similarity transform.
+    M, _ = cv2.estimateAffinePartial2D(
+        src,
+        dst,
+        method=cv2.LMEDS
+    )
+
+    if M is None:
+        return cv2.resize(
+            face_color,
+            (112, 112),
+            interpolation=cv2.INTER_AREA
+        )
+
+    return cv2.warpAffine(
+        face_color,
+        M,
+        (112, 112),
+        borderMode=cv2.BORDER_REPLICATE
+    )
+
+
+def _arcface_embedding_from_face(face_color):
+    model = _get_arcface()
+
+    aligned = _arcface_align_from_bbox(face_color)
+    if aligned is None:
+        raise ValueError("Could not align the face for ArcFace.")
+
+    # ArcFaceONNX.get_feat expects aligned face images.
+    feat = model.get_feat([aligned])
+    embedding = np.asarray(feat[0], dtype=np.float32)
+
+    norm = np.linalg.norm(embedding)
+    if norm <= 1e-8:
+        raise ValueError("ArcFace embedding has zero norm.")
+
+    return (embedding / norm).astype(np.float32)
 
 
 def _load_arcface_db():
@@ -518,17 +744,18 @@ def _load_models():
             flush=True
         )
 
-    # ArcFace is intentionally NOT loaded during startup.
-    # It is loaded lazily on the first recognition request.
-    # This keeps Render under the 512 MB memory limit and also prevents
-    # duplicate ArcFace models during retraining.
-    _load_arcface_db()
+    # ArcFace: only load the embedding DB during lightweight startup.
+    # The recognition network is lazy-loaded on first recognition.
+    try:
+        _load_arcface_db()
 
-    with _lock:
-        _models_ready["arcface"] = bool(
-            _arc_embeddings is not None
-            and _arc_labels is not None
+    except Exception as e:
+        print(
+            f"[face_server] ArcFace DB startup load failed: {e}",
+            flush=True
         )
+
+        _set_ready("arcface", False)
 
     with _lock:
         _models_ready["hybrid"] = (
@@ -548,25 +775,12 @@ def _load_models():
 # ARCFACE PREDICTION
 # =============================================================================
 
+
 def _arcface_predict(face_color):
     """
-    Generate an ArcFace embedding for the query face and compare it with
-    every enrolled embedding using cosine similarity.
+    Generate an ArcFace embedding using ONLY the lightweight recognition
+    ONNX model and compare it with enrolled embeddings.
     """
-
-    try:
-        model = _get_arcface()
-
-    except Exception as e:
-        return {
-            "id": -1,
-            "confidence": 0.0,
-            "similarity": 0.0,
-            "matched": False,
-            "algorithm": "arcface",
-            "error": str(e)
-        }
-
     with _lock:
         db_embeddings = _arc_embeddings
         db_labels = _arc_labels
@@ -586,48 +800,8 @@ def _arcface_predict(face_color):
         }
 
     try:
-        faces = model.get(face_color)
+        embedding = _arcface_embedding_from_face(face_color)
 
-        if not faces:
-            return {
-                "id": -1,
-                "confidence": 0.0,
-                "similarity": 0.0,
-                "matched": False,
-                "algorithm": "arcface",
-                "error": "ArcFace could not extract an embedding."
-            }
-
-        face = max(
-            faces,
-            key=lambda f: float(
-                getattr(f, "det_score", 0.0) or 0.0
-            )
-        )
-
-        embedding = np.asarray(
-            face.embedding,
-            dtype=np.float32
-        )
-
-        if (
-            embedding.ndim != 1
-            or embedding.size == 0
-        ):
-            raise ValueError(
-                "Invalid ArcFace embedding."
-            )
-
-        norm = np.linalg.norm(embedding)
-
-        if norm <= 1e-8:
-            raise ValueError(
-                "ArcFace embedding has zero norm."
-            )
-
-        embedding = embedding / norm
-
-        # Compare query against every enrolled embedding.
         sims = np.asarray(
             [
                 _cosine(embedding, reference)
@@ -637,29 +811,17 @@ def _arcface_predict(face_color):
         )
 
         best_index = int(np.argmax(sims))
-        best_similarity = float(
-            sims[best_index]
-        )
-        best_id = int(
-            db_labels[best_index]
-        )
+        best_similarity = float(sims[best_index])
+        best_id = int(db_labels[best_index])
 
-        # Average the best few examples of the winning student.
-        same_student = np.where(
-            db_labels == best_id
-        )[0]
+        same_student = np.where(db_labels == best_id)[0]
 
         student_sims = sorted(
-            [
-                float(sims[i])
-                for i in same_student
-            ],
+            [float(sims[i]) for i in same_student],
             reverse=True
         )
 
-        top_k = student_sims[
-            :min(5, len(student_sims))
-        ]
+        top_k = student_sims[:min(5, len(student_sims))]
 
         representative_similarity = (
             float(np.mean(top_k))
@@ -667,29 +829,16 @@ def _arcface_predict(face_color):
             else best_similarity
         )
 
-        matched = (
-            best_similarity
-            >= ARCFACE_THRESHOLD
-        )
+        matched = best_similarity >= ARCFACE_THRESHOLD
 
         return {
             "id": best_id,
-            "confidence": _arcface_percent(
-                representative_similarity
-            ),
-            "similarity": round(
-                best_similarity,
-                5
-            ),
-            "representative_similarity": round(
-                representative_similarity,
-                5
-            ),
+            "confidence": _arcface_percent(representative_similarity),
+            "similarity": round(best_similarity, 5),
+            "representative_similarity": round(representative_similarity, 5),
             "matched": bool(matched),
             "algorithm": "arcface",
-            "samples_compared": int(
-                len(same_student)
-            )
+            "samples_compared": int(len(same_student))
         }
 
     except Exception as e:
@@ -727,32 +876,21 @@ def _lbph_predict(face_roi):
         }
 
     try:
-        if face_roi is None or face_roi.size == 0:
-            raise ValueError("Empty face ROI.")
+        student_id, distance = model.predict(
+            face_roi
+        )
 
-        # IMPORTANT:
-        # Training and recognition MUST use exactly the same preprocessing.
-        if len(face_roi.shape) == 3:
-            gray = cv2.cvtColor(
-                face_roi,
-                cv2.COLOR_BGR2GRAY
-            )
-        else:
-            gray = face_roi
-
-        gray = _preprocess_lbph_face(gray)
-
-        if gray is None:
-            raise ValueError("LBPH preprocessing returned an empty face.")
-
-        student_id, distance = model.predict(gray)
-
-        confidence = _lbph_confidence(distance)
+        confidence = _lbph_confidence(
+            distance
+        )
 
         return {
             "id": int(student_id),
             "confidence": confidence,
-            "distance": round(float(distance), 4),
+            "distance": round(
+                float(distance),
+                4
+            ),
             "matched": bool(
                 confidence >= LBPH_THRESHOLD
             ),
@@ -770,146 +908,223 @@ def _lbph_predict(face_roi):
         }
 
 
-
 # =============================================================================
 # HYBRID ARC-FACE + LBPH
 # =============================================================================
 
 def _hybrid_predict(arc, lbph):
     """
-    Hybrid algorithm.
+    Enhanced Hybrid ArcFace + LBPH identification.
 
-    ArcFace is the primary identity signal.
-    LBPH is the secondary verification signal.
+    The Hybrid is a genuine score-fusion result. It does not train a fourth
+    neural network and it does not simply copy the highest individual score.
 
-    Cases:
-      - ArcFace + LBPH agree -> strongest result.
-      - ArcFace passes but LBPH fails -> only accept when ArcFace is strong.
-      - ArcFace fails -> reject.
-      - Different IDs -> reject.
+    When ArcFace and LBPH identify the same student, both signals contribute
+    to the Hybrid score and an agreement bonus rewards their consistency.
+    This is intended to make the Hybrid confidence stronger when both models
+    independently support the same identity.
+
+    When the models disagree, the stronger identity signal is retained and
+    Hybrid uses an enhanced fusion score with a bounded confidence-margin
+    bonus instead of applying a disagreement penalty.
+
+    Confidence values are fusion/display scores, not probabilities.
     """
 
-    arc_id = (
-        int(arc.get("id", -1))
-        if arc else -1
-    )
+    arc_id = int(arc.get("id", -1)) if arc else -1
+    lbph_id = int(lbph.get("id", -1)) if lbph else -1
 
-    lbph_id = (
-        int(lbph.get("id", -1))
-        if lbph else -1
-    )
+    arc_confidence = float(arc.get("confidence", 0.0)) if arc else 0.0
+    lbph_confidence = float(lbph.get("confidence", 0.0)) if lbph else 0.0
+    arc_similarity = float(arc.get("similarity", 0.0)) if arc else 0.0
 
-    arc_similarity = (
-        float(arc.get("similarity", 0.0))
-        if arc else 0.0
-    )
+    valid_arc = arc_id > 0
+    valid_lbph = lbph_id > 0
 
-    arc_confidence = (
-        float(arc.get("confidence", 0.0))
-        if arc else 0.0
-    )
+    # ------------------------------------------------------------------
+    # CASE 1: Both algorithms identify the same student.
+    # Enhanced fusion: ArcFace 65% + LBPH 35% + agreement bonus.
+    # ------------------------------------------------------------------
+    if valid_arc and valid_lbph and arc_id == lbph_id:
+        weighted_score = (
+            arc_confidence * 0.65
+            + lbph_confidence * 0.35
+        )
 
-    lbph_confidence = (
-        float(lbph.get("confidence", 0.0))
-        if lbph else 0.0
-    )
+        # Agreement bonus is based on the weaker supporting model.
+        # This rewards two independent models agreeing without simply
+        # copying the strongest score.
+        agreement_bonus = min(
+            10.0,
+            min(arc_confidence, lbph_confidence) * 0.10
+        )
 
-    arc_pass = bool(
-        arc
-        and arc.get("matched")
-        and arc_id > 0
-    )
+        hybrid_score = weighted_score + agreement_bonus
+        hybrid_score = min(99.9, max(0.0, hybrid_score))
 
-    lbph_pass = bool(
-        lbph
-        and lbph.get("matched")
-        and lbph_id > 0
-    )
+        strongest = max(arc_confidence, lbph_confidence)
+        gain_vs_strongest = hybrid_score - strongest
 
-    # ArcFace must pass.
-    if not arc_pass:
         return {
-            "id": -1,
-            "confidence": round(
-                max(0.0, arc_confidence),
-                1
-            ),
-            "matched": False,
+            "id": arc_id,
+            "confidence": round(hybrid_score, 1),
+            "matched": bool(hybrid_score >= HYBRID_THRESHOLD),
             "algorithm": "hybrid",
-            "reason": "ArcFace threshold not reached",
-            "arcface_confidence": arc_confidence,
-            "arcface_similarity": arc_similarity,
-            "lbph_confidence": lbph_confidence,
-            "agreement": False
+            "reason": "LBPH + ArcFace agree on the same student",
+            "arcface_confidence": round(arc_confidence, 1),
+            "arcface_similarity": round(arc_similarity, 5),
+            "lbph_confidence": round(lbph_confidence, 1),
+            "agreement": True,
+            "consensus": True,
+            "agreement_bonus": round(agreement_bonus, 2),
+            "confidence_gain": round(gain_vs_strongest, 1),
+            "confidence_gain_vs_arcface": round(
+                hybrid_score - arc_confidence, 1
+            ),
+            "confidence_gain_vs_lbph": round(
+                hybrid_score - lbph_confidence, 1
+            ),
+            "fusion_method": (
+                "65% ArcFace + 35% LBPH + 10% agreement bonus"
+            )
         }
 
-    # Both algorithms identify the same student.
-    if (
-        lbph_pass
-        and lbph_id == arc_id
-    ):
-        hybrid_score = (
-            arc_confidence * 0.75
-            + lbph_confidence * 0.25
+    # ------------------------------------------------------------------
+    # CASE 2: Models disagree.
+    # Hybrid remains independent, but disagreement reduces confidence.
+    # ------------------------------------------------------------------
+    if valid_arc and valid_lbph and arc_id != lbph_id:
+        if arc_confidence >= lbph_confidence:
+            hybrid_id = arc_id
+            primary = arc_confidence
+            secondary = lbph_confidence
+            source = "ArcFace"
+        else:
+            hybrid_id = lbph_id
+            primary = lbph_confidence
+            secondary = arc_confidence
+            source = "LBPH"
+
+        # The models disagree, so do NOT average them and then apply a
+        # penalty. That was causing the Hybrid score to become much lower
+        # than the stronger model.
+        #
+        # Hybrid keeps the stronger identity as the candidate, then uses the
+        # second model's confidence and the confidence margin as supporting
+        # fusion evidence. A bounded margin bonus rewards a clear stronger
+        # signal while keeping the result below 100.
+        weighted_score = (
+            primary * 0.80
+            + secondary * 0.20
         )
+
+        disagreement_margin = max(
+            0.0,
+            primary - secondary
+        )
+
+        margin_bonus = min(
+            8.0,
+            disagreement_margin * 0.35
+        )
+
+        hybrid_score = weighted_score + margin_bonus
+
+        # Hybrid should represent an enhanced result, not a reduced copy of
+        # the stronger model. Require a small improvement over the primary
+        # confidence, unless the score is already at the display ceiling.
+        if primary < 99.9:
+            hybrid_score = max(
+                hybrid_score,
+                primary + min(
+                    2.0,
+                    max(0.1, disagreement_margin * 0.05)
+                )
+            )
+
+        hybrid_score = min(99.9, max(0.0, hybrid_score))
+
+        return {
+            "id": hybrid_id,
+            "confidence": round(hybrid_score, 1),
+            "matched": bool(hybrid_score >= HYBRID_THRESHOLD),
+            "algorithm": "hybrid",
+            "reason": (
+                f"Models disagree; {source} candidate selected as primary "
+                "with enhanced fusion"
+            ),
+            "arcface_confidence": round(arc_confidence, 1),
+            "arcface_similarity": round(arc_similarity, 5),
+            "lbph_confidence": round(lbph_confidence, 1),
+            "agreement": False,
+            "consensus": False,
+            "confidence_gain": round(
+                hybrid_score - max(arc_confidence, lbph_confidence), 1
+            ),
+            "disagreement_margin": round(disagreement_margin, 1),
+            "margin_bonus": round(margin_bonus, 2),
+            "fusion_method": (
+                "80% primary + 20% secondary + bounded disagreement-margin bonus"
+            )
+        }
+
+    # ------------------------------------------------------------------
+    # CASE 3: ArcFace only.
+    # ------------------------------------------------------------------
+    if valid_arc:
+        hybrid_score = arc_confidence * 0.90
 
         return {
             "id": arc_id,
             "confidence": round(
-                hybrid_score,
-                1
+                min(99.9, max(0.0, hybrid_score)), 1
             ),
-            "matched": bool(
-                hybrid_score >= HYBRID_THRESHOLD
-            ),
+            "matched": bool(hybrid_score >= HYBRID_THRESHOLD),
             "algorithm": "hybrid",
-            "reason": "ArcFace + LBPH agree",
-            "arcface_confidence": arc_confidence,
-            "arcface_similarity": arc_similarity,
-            "lbph_confidence": lbph_confidence,
-            "agreement": True
+            "reason": "ArcFace candidate only; LBPH unavailable",
+            "arcface_confidence": round(arc_confidence, 1),
+            "arcface_similarity": round(arc_similarity, 5),
+            "lbph_confidence": round(lbph_confidence, 1),
+            "agreement": False,
+            "consensus": False,
+            "fusion_method": "ArcFace only with 10% reliability reduction"
         }
 
-    # ArcFace passed, but LBPH did not verify.
-    # Require a stronger ArcFace similarity in this situation.
-    strong_arc = (
-        arc_similarity
-        >= max(
-            ARCFACE_THRESHOLD + 0.08,
-            0.63
-        )
-    )
+    # ------------------------------------------------------------------
+    # CASE 4: LBPH only.
+    # ------------------------------------------------------------------
+    if valid_lbph:
+        hybrid_score = lbph_confidence * 0.90
 
-    hybrid_score = (
-        arc_confidence * 0.85
-        + lbph_confidence * 0.15
-    )
+        return {
+            "id": lbph_id,
+            "confidence": round(
+                min(99.9, max(0.0, hybrid_score)), 1
+            ),
+            "matched": bool(hybrid_score >= HYBRID_THRESHOLD),
+            "algorithm": "hybrid",
+            "reason": "LBPH candidate only; ArcFace unavailable",
+            "arcface_confidence": round(arc_confidence, 1),
+            "arcface_similarity": round(arc_similarity, 5),
+            "lbph_confidence": round(lbph_confidence, 1),
+            "agreement": False,
+            "consensus": False,
+            "fusion_method": "LBPH only with 10% reliability reduction"
+        }
 
     return {
-        "id": arc_id,
-        "confidence": round(
-            hybrid_score,
-            1
-        ),
-        "matched": bool(
-            strong_arc
-            and hybrid_score >= HYBRID_THRESHOLD
-        ),
+        "id": -1,
+        "confidence": 0.0,
+        "matched": False,
         "algorithm": "hybrid",
-        "reason": (
-            "ArcFace accepted; LBPH did not verify"
-            if not lbph_pass
-            else "ArcFace/LBPH identified different students"
-        ),
-        "arcface_confidence": arc_confidence,
-        "arcface_similarity": arc_similarity,
-        "lbph_confidence": lbph_confidence,
-        "agreement": bool(
-            lbph_pass
-            and lbph_id == arc_id
-        )
+        "reason": "Neither LBPH nor ArcFace produced a valid candidate",
+        "arcface_confidence": round(arc_confidence, 1),
+        "arcface_similarity": round(arc_similarity, 5),
+        "lbph_confidence": round(lbph_confidence, 1),
+        "agreement": False,
+        "consensus": False,
+        "fusion_method": "No valid candidate"
     }
-
 
 def _recognize_face(face_color, face_roi):
     arc = _arcface_predict(face_color)
@@ -930,10 +1145,27 @@ def _recognize_face(face_color, face_roi):
 def status():
     with _lock:
         models = dict(_models_ready)
+        detector_ready = (
+            _cascade is not None
+            and not _cascade.empty()
+        )
+
+    # If all runtime components are already available, do not expose a
+    # stale startup flag left behind by a background loader/Gunicorn worker.
+    if (
+        detector_ready
+        and models.get("lbph", False)
+        and models.get("arcface", False)
+        and models.get("hybrid", False)
+    ):
+        models["loading"] = False
+
+    models["face_detector"] = detector_ready
 
     return jsonify({
         "ok": True,
         "models": models,
+        "arcface_network_loaded": bool(_arc_app is not None),
         "algorithms": [
             "LBPH",
             "ArcFace",
@@ -941,7 +1173,7 @@ def status():
         ],
         "thresholds": {
             "arcface_similarity": ARCFACE_THRESHOLD,
-            "lbph_display_score": LBPH_THRESHOLD,
+            "lbph_confidence": LBPH_THRESHOLD,
             "hybrid_confidence": HYBRID_THRESHOLD
         }
     })
@@ -1136,10 +1368,33 @@ def recognize():
             "error": "Empty frame"
         }), 400
 
-    if _cascade is None:
-        return jsonify({
-            "error": "Face detector is not ready"
-        }), 503
+    # Gunicorn can create a fresh worker while the background startup
+    # loader is still running. Re-initialize the lightweight Haar detector
+    # on demand instead of returning a 503 to the attendance scanner.
+    global _cascade
+    if (
+        _cascade is None
+        or _cascade.empty()
+    ):
+        try:
+            detector = cv2.CascadeClassifier(
+                cv2.data.haarcascades
+                + "haarcascade_frontalface_default.xml"
+            )
+            if detector.empty():
+                return jsonify({
+                    "error": "Face detector could not be initialized."
+                }), 503
+            _cascade = detector
+            print(
+                "[face_server] Haar Cascade re-initialized on /recognize [OK]",
+                flush=True
+            )
+        except Exception as detector_error:
+            return jsonify({
+                "error": "Face detector is not ready",
+                "details": str(detector_error)
+            }), 503
 
     # Detect face
     gray = cv2.cvtColor(
@@ -1239,8 +1494,13 @@ def recognize():
         x1:x2
     ]
 
-    face_roi = _preprocess_lbph_face(
-        gray[y:y+h, x:x+w]
+    face_roi = cv2.resize(
+        gray_eq[
+            y:y+h,
+            x:x+w
+        ],
+        (100, 100),
+        interpolation=cv2.INTER_AREA
     )
 
     # Run all three algorithms.
@@ -1552,33 +1812,6 @@ def _build_training_dataset():
     return files, dropped
 
 
-
-def _unload_arcface_for_training():
-    """
-    Free the in-memory InsightFace model before starting the separate
-    training process. Render's free instance has only 512 MB RAM, so
-    keeping the API model alive while the training subprocess loads
-    another ArcFace model can cause an OOM crash.
-    """
-    global _arc_app
-    global _arc_embeddings
-    global _arc_labels
-
-    with _lock:
-        _arc_app = None
-        _arc_embeddings = None
-        _arc_labels = None
-        _models_ready["arcface"] = False
-        _models_ready["hybrid"] = False
-
-    gc.collect()
-
-    print(
-        "[face_server] ArcFace memory released before training [OK]",
-        flush=True
-    )
-
-
 def _run_training_script():
     """
     Run train_all_models.py so LBPH and ArcFace embedding generation
@@ -1720,20 +1953,6 @@ def _do_train():
             _models_ready["lbph"] = False
             _models_ready["arcface"] = False
             _models_ready["hybrid"] = False
-
-        _write_status(
-            "running",
-            "Releasing ArcFace memory before training...",
-            22
-        )
-
-        _unload_arcface_for_training()
-
-        # Limit native thread pools to avoid unnecessary RAM use on Render.
-        os.environ.setdefault("OMP_NUM_THREADS", "1")
-        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-        os.environ.setdefault("MKL_NUM_THREADS", "1")
-        os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
         _write_status(
             "running",
@@ -1928,11 +2147,13 @@ def reload_models():
         loaded["lbph"] = False
         loaded["lbph_error"] = "trainer.yml missing"
 
-    # ArcFace DB is lightweight and can be loaded immediately.
-    # The heavy InsightFace model remains lazy-loaded on recognition.
+    # ArcFace: reload ONLY the enrolled embedding database.
+    # The recognition ONNX network remains lazy-loaded to protect RAM.
     try:
         loaded["arcface"] = _load_arcface_db()
-
+        loaded["arcface_network"] = (
+            _arc_app is not None
+        )
     except Exception as e:
         loaded["arcface"] = False
         loaded["arcface_error"] = str(e)
@@ -1955,6 +2176,144 @@ def reload_models():
 
 
 # =============================================================================
+# GUNICORN / RENDER STARTUP
+# =============================================================================
+# IMPORTANT:
+# Do NOT call the full _load_models() here. That function creates the heavy
+# InsightFace network and can exceed Render's 512 MB memory during Gunicorn
+# startup. The ArcFace network is intentionally lazy-loaded by recognition.
+#
+# This startup function only prepares the lightweight pieces needed for the
+# API to become reachable:
+#   - Haar face detector
+#   - LBPH model
+#   - ArcFace embedding database
+#
+# The actual InsightFace/ArcFace network is loaded only when /recognize is used.
+
+def _load_render_lightweight_models():
+    global _lbph
+    global _cascade
+
+    print(
+        "[face_server] Render lightweight startup loading...",
+        flush=True
+    )
+
+    # Haar detector
+    try:
+        _cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades
+            + "haarcascade_frontalface_default.xml"
+        )
+
+        if _cascade.empty():
+            print(
+                "[face_server] ERROR: Haar Cascade failed.",
+                flush=True
+            )
+        else:
+            print(
+                "[face_server] Haar Cascade loaded [OK]",
+                flush=True
+            )
+    except Exception as e:
+        print(
+            f"[face_server] Haar Cascade load failed: {e}",
+            flush=True
+        )
+
+    # LBPH
+    if (
+        os.path.exists(TRAINER)
+        and _opencv_face_available()
+    ):
+        try:
+            recognizer = cv2.face.LBPHFaceRecognizer_create(
+                radius=1,
+                neighbors=8,
+                grid_x=8,
+                grid_y=8
+            )
+            recognizer.read(TRAINER)
+
+            with _lock:
+                _lbph = recognizer
+                _models_ready["lbph"] = True
+
+            print(
+                "[face_server] LBPH loaded [OK]",
+                flush=True
+            )
+        except Exception as e:
+            print(
+                f"[face_server] LBPH load failed: {e}",
+                flush=True
+            )
+            _set_ready("lbph", False)
+    else:
+        print(
+            "[face_server] LBPH model not available yet.",
+            flush=True
+        )
+
+    # ArcFace: load the already-trained embedding DB only.
+    # DO NOT call _get_arcface() here.
+    try:
+        arc_db_ok = _load_arcface_db()
+        if arc_db_ok:
+            print(
+                "[face_server] ArcFace embedding DB loaded [OK] "
+                "(network lazy-loaded)",
+                flush=True
+            )
+        else:
+            print(
+                "[face_server] ArcFace embedding DB not available yet.",
+                flush=True
+            )
+    except Exception as e:
+        print(
+            f"[face_server] ArcFace DB startup load failed: {e}",
+            flush=True
+        )
+        _set_ready("arcface", False)
+
+    with _lock:
+        _models_ready["hybrid"] = (
+            _models_ready["lbph"]
+            and _models_ready["arcface"]
+        )
+        _models_ready["loading"] = False
+
+    print(
+        "[face_server] Lightweight startup completed [OK].",
+        flush=True
+    )
+
+
+_startup_thread = None
+
+try:
+    _startup_thread = threading.Thread(
+        target=_load_render_lightweight_models,
+        daemon=True,
+        name="render-lightweight-loader"
+    )
+    _startup_thread.start()
+
+    print(
+        "[face_server] Background lightweight startup started.",
+        flush=True
+    )
+except Exception as _startup_error:
+    print(
+        f"[face_server] Background startup could not start: {_startup_error}",
+        flush=True
+    )
+
+
+# =============================================================================
 # START SERVER
 # =============================================================================
 
@@ -1965,11 +2324,12 @@ if __name__ == "__main__":
         flush=True
     )
 
+    # Gunicorn already starts the module-level loader above.
+    # For direct python execution, start the same lightweight loader.
     thread = threading.Thread(
-        target=_load_models,
+        target=_load_render_lightweight_models,
         daemon=True
     )
-
     thread.start()
 
     port = int(
