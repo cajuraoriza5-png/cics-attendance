@@ -1065,6 +1065,14 @@ def main():
             files
         )
 
+        # Explicitly mark LBPH as finished before any ArcFace work begins.
+        update_status(
+            "running",
+            "LBPH training completed. Model saved. Measuring LBPH validation accuracy...",
+            33,
+            {"lbph": lbph_result}
+        )
+
         # Hold-out validation is reported separately from training accuracy.
         # This gives a more meaningful estimate of recognition performance.
         update_status(
@@ -1110,6 +1118,7 @@ def main():
                         "accuracy": round(correct / total * 100.0, 1),
                         "validation_images": total
                     }
+                    lbph_result["validation_accuracy"] = lbph_validation["accuracy"]
                     update_status(
                         "running",
                         f"LBPH validation accuracy: {lbph_validation['accuracy']:.1f}%",
@@ -1127,7 +1136,7 @@ def main():
 
         update_status(
             "running",
-            "LBPH completed. Loading ArcFace...",
+            "LBPH completed successfully. Loading ArcFace...",
             36,
             {
                 "lbph": lbph_result,
@@ -1157,7 +1166,17 @@ def main():
             }
         )
 
-        validation = evaluate_validation(files, arc_model)
+        try:
+            validation = evaluate_validation(files, arc_model)
+        except Exception as validation_error:
+            print(
+                f"[train] Full validation warning: {validation_error}",
+                flush=True
+            )
+            validation = {
+                "available": False,
+                "reason": str(validation_error)
+            }
 
         if validation.get("available"):
             update_status(
@@ -1242,7 +1261,7 @@ def main():
                 f"Validation accuracy — "
                 f"LBPH {validation['lbph_accuracy']:.1f}% | "
                 f"ArcFace {validation['arcface_accuracy']:.1f}% | "
-                f"Hybrid {validation['hybrid_accuracy']:.1f}%."
+                f"Hybrid {validation['hybrid_accuracy']:.1f}% at 80% threshold."
             )
         else:
             final_message = "Training completed. Validation accuracy was unavailable."
