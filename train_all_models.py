@@ -322,7 +322,7 @@ def load_gray_face(path, cascade=None):
         return None
 
     face = cv2.resize(
-        face, (160, 160), interpolation=cv2.INTER_AREA
+        face, (128, 128), interpolation=cv2.INTER_AREA
     )
 
     # Local contrast enhancement is more controlled than global equalizeHist.
@@ -337,7 +337,7 @@ def load_gray_face(path, cascade=None):
 
 def train_lbph(files):
     print(
-        "[train] Training improved LBPH (160x160 face crop + CLAHE)...",
+        "[train] Training FAST LBPH (128x128 face crop + CLAHE)...",
         flush=True
     )
 
@@ -386,8 +386,8 @@ def train_lbph(files):
 
     recognizer = (
         cv2.face.LBPHFaceRecognizer_create(
-            radius=2,
-            neighbors=16,
+            radius=1,
+            neighbors=8,
             grid_x=8,
             grid_y=8
         )
