@@ -93,7 +93,7 @@ LBPH_THRESHOLD = float(
 )
 
 HYBRID_THRESHOLD = float(
-    os.environ.get("HYBRID_THRESHOLD", "65.0")
+    os.environ.get("HYBRID_THRESHOLD", "80.0")
 )
 
 MIN_SAMPLES_PER_STUDENT = int(
