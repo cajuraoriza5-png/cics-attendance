@@ -286,13 +286,13 @@ def _iter_face_files(directory):
 
 
 def _preprocess_lbph_face(gray_face):
-    """Same LBPH preprocessing used during training and recognition."""
+    """Same LBPH preprocessing used during training and recognition: face crop -> grayscale -> 128x128 -> CLAHE."""
     if gray_face is None or gray_face.size == 0:
         return None
 
     face = cv2.resize(
         gray_face,
-        (160, 160),
+        (128, 128),
         interpolation=cv2.INTER_AREA
     )
 
@@ -730,8 +730,8 @@ def _lbph_predict(face_roi):
         if face_roi is None or face_roi.size == 0:
             raise ValueError("Empty face ROI.")
 
-        # EXACTLY match the LBPH training preprocessing:
-        # face crop -> grayscale -> 128x128 -> CLAHE.
+        # IMPORTANT:
+        # Training and recognition MUST use exactly the same preprocessing.
         if len(face_roi.shape) == 3:
             gray = cv2.cvtColor(
                 face_roi,
@@ -740,17 +740,10 @@ def _lbph_predict(face_roi):
         else:
             gray = face_roi
 
-        gray = cv2.resize(
-            gray,
-            (128, 128),
-            interpolation=cv2.INTER_AREA
-        )
+        gray = _preprocess_lbph_face(gray)
 
-        clahe = cv2.createCLAHE(
-            clipLimit=2.0,
-            tileGridSize=(8, 8)
-        )
-        gray = clahe.apply(gray)
+        if gray is None:
+            raise ValueError("LBPH preprocessing returned an empty face.")
 
         student_id, distance = model.predict(gray)
 
@@ -760,7 +753,9 @@ def _lbph_predict(face_roi):
             "id": int(student_id),
             "confidence": confidence,
             "distance": round(float(distance), 4),
-            "matched": bool(confidence >= LBPH_THRESHOLD),
+            "matched": bool(
+                confidence >= LBPH_THRESHOLD
+            ),
             "algorithm": "lbph"
         }
 
@@ -946,7 +941,7 @@ def status():
         ],
         "thresholds": {
             "arcface_similarity": ARCFACE_THRESHOLD,
-            "lbph_confidence": LBPH_THRESHOLD,
+            "lbph_display_score": LBPH_THRESHOLD,
             "hybrid_confidence": HYBRID_THRESHOLD
         }
     })
@@ -1933,13 +1928,10 @@ def reload_models():
         loaded["lbph"] = False
         loaded["lbph_error"] = "trainer.yml missing"
 
-    # ArcFace
+    # ArcFace DB is lightweight and can be loaded immediately.
+    # The heavy InsightFace model remains lazy-loaded on recognition.
     try:
-        _get_arcface()
-
-        loaded["arcface"] = (
-            _load_arcface_db()
-        )
+        loaded["arcface"] = _load_arcface_db()
 
     except Exception as e:
         loaded["arcface"] = False
