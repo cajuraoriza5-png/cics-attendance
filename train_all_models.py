@@ -543,129 +543,51 @@ def align_for_arcface(face):
     )
 
 
+def file_signature(path):
+    try:
+        st=os.stat(path); return hashlib.sha1(f'{st.st_size}:{st.st_mtime_ns}'.encode()).hexdigest()
+    except OSError: return None
+
+def load_arcface_cache():
+    if not os.path.isfile(ARC_DB): return {}, {}, {}
+    try:
+        db=np.load(ARC_DB,allow_pickle=False); e=np.asarray(db['embeddings'],dtype=np.float32); l=np.asarray(db['labels'],dtype=np.int32); n=np.asarray(db['filenames'],dtype=str); sg=np.asarray(db['signatures'],dtype=str) if 'signatures' in db.files else np.asarray([],dtype=str); db.close()
+        return {str(x):e[i] for i,x in enumerate(n)}, {str(x):int(l[i]) for i,x in enumerate(n)}, ({str(x):str(sg[i]) for i,x in enumerate(n)} if len(sg)==len(n) else {})
+    except Exception as e: print(f'[train] Cache ignored: {e}',flush=True); return {},{},{}
+
 def train_arcface(files, model):
-    print("[train] Generating ArcFace embeddings in batches...", flush=True)
-
-    embeddings = []
-    labels = []
-    failed = []
-    total = len(files)
-    batch_size = int(os.environ.get("ARCFACE_BATCH_SIZE", "8"))
-
-    cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    )
-
-    batch_faces = []
-    batch_labels = []
-    batch_names = []
-
-    def flush_batch():
-        if not batch_faces:
-            return
-
-        features = model.get_feat(batch_faces)
-
-        for emb, label, name in zip(features, batch_labels, batch_names):
-            norm = normalize_embedding(emb)
-            if norm is None:
-                failed.append(name)
-                continue
-            embeddings.append(norm)
-            labels.append(label)
-            embedding_files.append(name)
-
-        batch_faces.clear()
-        batch_labels.clear()
-        batch_names.clear()
-
-    for index, (path, student_id, filename) in enumerate(files, start=1):
-        try:
-            image = cv2.imread(path, cv2.IMREAD_COLOR)
-            if image is None:
-                failed.append(filename)
-                continue
-
-            gray = cv2.equalizeHist(
-                cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            )
-
-            boxes = cascade.detectMultiScale(
-                gray, 1.10, 4, minSize=(40,40)
-            )
-
-            if len(boxes) == 0:
-                boxes = cascade.detectMultiScale(
-                    gray, 1.05, 3, minSize=(30,30)
-                )
-
-            if len(boxes) == 0:
-                failed.append(filename)
-                continue
-
-            x, y, w, h = max(boxes, key=lambda r: r[2] * r[3])
-
-            px, py = int(w*0.12), int(h*0.12)
-            x1, y1 = max(0,x-px), max(0,y-py)
-            x2, y2 = min(image.shape[1],x+w+px), min(image.shape[0],y+h+py)
-
-            aligned = align_for_arcface(image[y1:y2, x1:x2])
-            if aligned is None:
-                failed.append(filename)
-                continue
-
-            batch_faces.append(aligned)
-            batch_labels.append(student_id)
-            batch_names.append(filename)
-
-            if len(batch_faces) >= batch_size:
-                flush_batch()
-
-            if index % batch_size == 0 or index == total:
-                progress = 40 + int((index / max(1,total)) * 45)
-                update_status(
-                    "running",
-                    f"ArcFace embeddings {index}/{total}...",
-                    progress
-                )
-
-        except Exception as e:
-            print(f"[train] ArcFace failed for {filename}: {e}", flush=True)
-            failed.append(filename)
-
-    flush_batch()
-
-    if not embeddings:
-        raise RuntimeError("ArcFace could not generate any embeddings.")
-
-    embedding_array = np.asarray(embeddings, dtype=np.float32)
-    label_array = np.asarray(labels, dtype=np.int32)
-    file_array = np.asarray(embedding_files, dtype="U512")
-
-    temp = ARC_DB + ".tmp"
-    np.savez_compressed(
-        temp,
-        embeddings=embedding_array,
-        labels=label_array,
-        filenames=file_array
-    )
-
-    actual_temp = temp if os.path.exists(temp) else temp + ".npz"
-    os.replace(actual_temp, ARC_DB)
-
-    gc.collect()
-
-    print(f"[train] ArcFace DB saved: {ARC_DB}", flush=True)
-
-    return {
-        "ok": True,
-        "samples": int(len(embedding_array)),
-        "students": int(len(np.unique(label_array))),
-        "failed_count": len(failed),
-        "failed_images": failed[:50],
-        "batch_size": batch_size
-    }
-
+    cached, cached_labels, cached_sigs=load_arcface_cache(); embeddings=[]; labels=[]; names=[]; sigs=[]; failed=[]; reused=0; generated=0; total=len(files); batch_size=int(os.environ.get('ARCFACE_BATCH_SIZE','16'))
+    cascade=cv2.CascadeClassifier(cv2.data.haarcascades+'haarcascade_frontalface_default.xml'); bf=[]; bl=[]; bn=[]; bs=[]
+    def flush():
+        nonlocal generated
+        if not bf:return
+        features=model.get_feat(bf)
+        for emb,label,name,sig in zip(features,bl,bn,bs):
+            norm=normalize_embedding(emb)
+            if norm is None: failed.append(name); continue
+            embeddings.append(norm); labels.append(label); names.append(name); sigs.append(sig); generated+=1
+        bf.clear();bl.clear();bn.clear();bs.clear()
+    for i,(path,sid,filename) in enumerate(files,1):
+        sig=file_signature(path)
+        if sig and filename in cached and cached_labels.get(filename)==sid and cached_sigs.get(filename)==sig:
+            embeddings.append(cached[filename]); labels.append(sid); names.append(filename); sigs.append(sig); reused+=1
+        else:
+            try:
+                image=cv2.imread(path,cv2.IMREAD_COLOR)
+                if image is None: failed.append(filename); continue
+                gray=cv2.equalizeHist(cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)); boxes=cascade.detectMultiScale(gray,1.10,4,minSize=(40,40))
+                if len(boxes)==0: boxes=cascade.detectMultiScale(gray,1.05,3,minSize=(30,30))
+                if len(boxes)==0: failed.append(filename); continue
+                x,y,w,h=max(boxes,key=lambda r:r[2]*r[3]); px,py=int(w*.12),int(h*.12); x1,y1=max(0,x-px),max(0,y-py); x2,y2=min(image.shape[1],x+w+px),min(image.shape[0],y+h+py); aligned=align_for_arcface(image[y1:y2,x1:x2])
+                if aligned is None: failed.append(filename); continue
+                bf.append(aligned);bl.append(sid);bn.append(filename);bs.append(sig)
+                if len(bf)>=batch_size: flush()
+            except Exception as e: print(f'[train] ArcFace failed for {filename}: {e}',flush=True); failed.append(filename)
+        if i%batch_size==0 or i==total: update_status('running',f'ArcFace {i}/{total} ({reused} reused, {generated} generated)',40+int(i/max(1,total)*45))
+    flush()
+    if not embeddings: raise RuntimeError('ArcFace could not generate any embeddings.')
+    temp=ARC_DB+'.tmp'; np.savez_compressed(temp,embeddings=np.asarray(embeddings,dtype=np.float32),labels=np.asarray(labels,dtype=np.int32),filenames=np.asarray(names,dtype='U512'),signatures=np.asarray(sigs,dtype='U128')); actual=temp if os.path.exists(temp) else temp+'.npz'; os.replace(actual,ARC_DB); gc.collect()
+    return {'ok':True,'samples':len(embeddings),'students':len(np.unique(labels)),'failed_count':len(failed),'failed_images':failed[:50],'batch_size':batch_size,'reused':reused,'generated':generated}
 
 
 # =============================================================================
@@ -937,357 +859,20 @@ def _arcface_align_from_validation_crop(face_color):
 # =============================================================================
 
 def main():
-    print(
-        "================================================",
-        flush=True
-    )
-
-    print(
-        "[train] CICS 3-Algorithm Face Training",
-        flush=True
-    )
-
-    print(
-        "Algorithms: LBPH + ArcFace + Hybrid",
-        flush=True
-    )
-
-    print(
-        "================================================",
-        flush=True
-    )
-
-    update_status(
-        "starting",
-        "Initializing LBPH + ArcFace training...",
-        0
-    )
-
+    update_status('starting','Initializing FAST LBPH + ArcFace training...',0)
     try:
-        files, dropped = (
-            build_training_dataset()
-        )
-
-        counts = Counter(
-            student_id
-            for _, student_id, _ in files
-        )
-
-        print(
-            f"[train] Valid images: {len(files)}",
-            flush=True
-        )
-
-        print(
-            f"[train] Students: {len(counts)}",
-            flush=True
-        )
-
-        print(
-            f"[train] Samples per student: "
-            f"{dict(sorted(counts.items()))}",
-            flush=True
-        )
-
-        update_status(
-            "running",
-            (
-                f"Dataset ready: {len(files)} "
-                f"images / {len(counts)} students."
-            ),
-            10,
-            {
-                "samples": len(files),
-                "students": len(counts),
-                "samples_per_student": dict(
-                    sorted(counts.items())
-                ),
-                "dropped_students": dropped
-            }
-        )
-
-        # ---------------------------------------------------------
-        # LBPH
-        # ---------------------------------------------------------
-
-        update_status(
-            "running",
-            "Training LBPH...",
-            20
-        )
-
-        lbph_result = train_lbph(
-            files
-        )
-
-        # Explicitly mark LBPH as finished before any ArcFace work begins.
-        update_status(
-            "running",
-            "LBPH training completed. Model saved. Measuring LBPH validation accuracy...",
-            33,
-            {"lbph": lbph_result}
-        )
-
-        # Hold-out validation is reported separately from training accuracy.
-        # This gives a more meaningful estimate of recognition performance.
-        update_status(
-            "running",
-            "LBPH completed. Preparing validation accuracy...",
-            34,
-            {
-                "lbph": lbph_result
-            }
-        )
-
-        lbph_validation = None
-        try:
-            _, val_files_preview = _validation_split(files)
-            if val_files_preview:
-                # A temporary ArcFace model is not needed yet; calculate LBPH
-                # validation directly with a temporary held-out model.
-                train_val_files, val_only = _validation_split(files)
-                vf, vl = [], []
-                for vpath, vsid, _ in train_val_files:
-                    img = load_gray_face(vpath)
-                    if img is not None:
-                        vf.append(img)
-                        vl.append(vsid)
-                temp_lb = None
-                if vf and len(set(vl)) >= 2:
-                    temp_lb = cv2.face.LBPHFaceRecognizer_create(
-                        radius=1, neighbors=8, grid_x=8, grid_y=8
-                    )
-                    temp_lb.train(vf, np.asarray(vl, dtype=np.int32))
-
-                correct = total = 0
-                for vpath, vsid, _ in val_only:
-                    img = load_gray_face(vpath)
-                    if img is None or temp_lb is None:
-                        continue
-                    pred, _ = temp_lb.predict(img)
-                    total += 1
-                    correct += int(int(pred) == int(vsid))
-
-                if total:
-                    lbph_validation = {
-                        "accuracy": round(correct / total * 100.0, 1),
-                        "validation_images": total
-                    }
-                    lbph_result["validation_accuracy"] = lbph_validation["accuracy"]
-                    update_status(
-                        "running",
-                        f"LBPH validation accuracy: {lbph_validation['accuracy']:.1f}%",
-                        35,
-                        {
-                            "lbph": lbph_result,
-                            "accuracy": {"lbph": lbph_validation}
-                        }
-                    )
-        except Exception as validation_error:
-            print(
-                f"[train] LBPH validation warning: {validation_error}",
-                flush=True
-            )
-
-        update_status(
-            "running",
-            "LBPH completed successfully. Loading ArcFace...",
-            36,
-            {
-                "lbph": lbph_result,
-                "accuracy": {"lbph": lbph_validation} if lbph_validation else {}
-            }
-        )
-
-        # ---------------------------------------------------------
-        # ArcFace
-        # ---------------------------------------------------------
-
-        arc_model = get_arcface()
-
-        arc_result = train_arcface(
-            files,
-            arc_model
-        )
-
-        # Free the ArcFace ONNX model before validation. Render has only 512 MB
-        # and the training process must not keep a second large model alive.
-        try:
-            del arc_model
-        except Exception:
-            pass
-        gc.collect()
-
-        # Validate using the embeddings already produced above. This avoids
-        # running ArcFace inference a second time and is much faster/lighter.
-        update_status(
-            "running",
-            "ArcFace embeddings completed. Running quick validation (no extra ArcFace inference)...",
-            88,
-            {
-                "lbph": lbph_result,
-                "arcface": arc_result
-            }
-        )
-
-        try:
-            validation = evaluate_validation(files, None)
-        except Exception as validation_error:
-            print(
-                f"[train] Full validation warning: {validation_error}",
-                flush=True
-            )
-            validation = {
-                "available": False,
-                "reason": str(validation_error)
-            }
-
-        if validation.get("available"):
-            update_status(
-                "running",
-                (
-                    f"Validation accuracy — "
-                    f"LBPH: {validation['lbph_accuracy']:.1f}% | "
-                    f"ArcFace: {validation['arcface_accuracy']:.1f}% | "
-                    f"Hybrid: {validation['hybrid_accuracy']:.1f}%"
-                ),
-                91,
-                {
-                    "lbph": lbph_result,
-                    "arcface": arc_result,
-                    "accuracy": validation
-                }
-            )
+        files,dropped=build_training_dataset(); counts=Counter(x[1] for x in files); update_status('running',f'Dataset ready: {len(files)} images / {len(counts)} students.',5)
+        update_status('running','Training LBPH...',10); lbph_result=train_lbph(files); update_status('running','LBPH completed. No second validation training.',35,{'lbph':lbph_result})
+        _,_,cache_sigs=load_arcface_cache(); all_cached=bool(cache_sigs) and all(file_signature(path)==cache_sigs.get(name) for path,_,name in files)
+        if all_cached:
+            db=np.load(ARC_DB,allow_pickle=False); arc_result={'ok':True,'samples':int(len(db['embeddings'])),'students':int(len(np.unique(db['labels']))),'reused':int(len(db['embeddings'])),'generated':0,'cache_only':True}; db.close(); update_status('running','ArcFace cache current. Skipping embedding generation.',88,{'lbph':lbph_result,'arcface':arc_result})
         else:
-            update_status(
-                "running",
-                "Validation accuracy unavailable: " + validation.get("reason", "unknown reason"),
-                91,
-                {
-                    "lbph": lbph_result,
-                    "arcface": arc_result,
-                    "accuracy": validation
-                }
-            )
-
-        # ---------------------------------------------------------
-        # Hybrid
-        # ---------------------------------------------------------
-
-        update_status(
-            "running",
-            "Preparing Hybrid ArcFace + LBPH...",
-            92,
-            {
-                "lbph": lbph_result,
-                "arcface": arc_result
-            }
-        )
-
-        hybrid_result = {
-            "ok": (
-                os.path.exists(
-                    TRAINER
-                )
-                and os.path.exists(
-                    ARC_DB
-                )
-            ),
-            "type": "decision_fusion",
-            "description": (
-                "ArcFace primary identity + "
-                "LBPH secondary verification"
-            )
-        }
-
-        result = {
-            "lbph": lbph_result,
-            "arcface": arc_result,
-            "hybrid": hybrid_result,
-            "accuracy": validation,
-            "samples": len(files),
-            "students": len(counts),
-            "samples_per_student": dict(
-                sorted(counts.items())
-            ),
-            "dropped_students": dropped
-        }
-
-        if not hybrid_result["ok"]:
-            raise RuntimeError(
-                "One or more required model files "
-                "were not created."
-            )
-
-        if validation.get("available"):
-            final_message = (
-                "Training completed. "
-                f"Validation accuracy — "
-                f"LBPH {validation['lbph_accuracy']:.1f}% | "
-                f"ArcFace {validation['arcface_accuracy']:.1f}% | "
-                f"Hybrid {validation['hybrid_accuracy']:.1f}% at 80% threshold."
-            )
-        else:
-            final_message = "Training completed. Validation accuracy was unavailable."
-
-        update_status(
-            "done",
-            final_message,
-            100,
-            result
-        )
-
-        print(
-            "================================================",
-            flush=True
-        )
-
-        print(
-            "[train] TRAINING COMPLETED SUCCESSFULLY",
-            flush=True
-        )
-
-        print(
-            f"[train] LBPH: {lbph_result}",
-            flush=True
-        )
-
-        print(
-            f"[train] ArcFace: {arc_result}",
-            flush=True
-        )
-
-        print(
-            f"[train] Hybrid: {hybrid_result}",
-            flush=True
-        )
-
-        print(
-            "================================================",
-            flush=True
-        )
-
-        return 0
-
+            update_status('running','Loading ArcFace for new/changed images...',38,{'lbph':lbph_result}); arc_model=get_arcface(); arc_result=train_arcface(files,arc_model); del arc_model; gc.collect(); update_status('running',f'ArcFace ready: {arc_result["generated"]} generated / {arc_result["reused"]} reused.',88,{'lbph':lbph_result,'arcface':arc_result})
+        hybrid={'ok':os.path.exists(TRAINER) and os.path.exists(ARC_DB),'type':'decision_fusion','threshold':80.0}; result={'lbph':lbph_result,'arcface':arc_result,'hybrid':hybrid,'accuracy':{'validation_skipped':True,'reason':'Fast training mode'},'samples':len(files),'students':len(counts),'dropped_students':dropped}
+        if not hybrid['ok']: raise RuntimeError('Required model files were not created.')
+        update_status('done','FAST training completed. LBPH + ArcFace + Hybrid ready at 80%.',100,result); return 0
     except Exception as e:
-        traceback.print_exc()
-
-        update_status(
-            "error",
-            f"Training failed: {e}",
-            0,
-            {
-                "error": str(e)
-            }
-        )
-
-        print(
-            f"[train] TRAINING FAILED: {e}",
-            flush=True
-        )
-
-        return 1
-
+        traceback.print_exc(); update_status('error',f'Training failed: {e}',0,{'error':str(e)}); return 1
 
 if __name__ == "__main__":
     raise SystemExit(
