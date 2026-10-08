@@ -29,6 +29,7 @@ import subprocess
 import time
 import re
 import shutil
+import gc
 from collections import Counter
 
 import numpy as np
@@ -359,9 +360,10 @@ def _get_arcface():
         providers=["CPUExecutionProvider"]
     )
 
+    # Smaller detector input reduces CPU/RAM usage on Render's 512 MB plan.
     model.prepare(
         ctx_id=-1,
-        det_size=(640, 640)
+        det_size=(320, 320)
     )
 
     with _lock:
@@ -516,18 +518,17 @@ def _load_models():
             flush=True
         )
 
-    # ArcFace
-    try:
-        _get_arcface()
-        _load_arcface_db()
+    # ArcFace is intentionally NOT loaded during startup.
+    # It is loaded lazily on the first recognition request.
+    # This keeps Render under the 512 MB memory limit and also prevents
+    # duplicate ArcFace models during retraining.
+    _load_arcface_db()
 
-    except Exception as e:
-        print(
-            f"[face_server] ArcFace startup load failed: {e}",
-            flush=True
+    with _lock:
+        _models_ready["arcface"] = bool(
+            _arc_embeddings is not None
+            and _arc_labels is not None
         )
-
-        _set_ready("arcface", False)
 
     with _lock:
         _models_ready["hybrid"] = (
@@ -1539,6 +1540,33 @@ def _build_training_dataset():
     return files, dropped
 
 
+
+def _unload_arcface_for_training():
+    """
+    Free the in-memory InsightFace model before starting the separate
+    training process. Render's free instance has only 512 MB RAM, so
+    keeping the API model alive while the training subprocess loads
+    another ArcFace model can cause an OOM crash.
+    """
+    global _arc_app
+    global _arc_embeddings
+    global _arc_labels
+
+    with _lock:
+        _arc_app = None
+        _arc_embeddings = None
+        _arc_labels = None
+        _models_ready["arcface"] = False
+        _models_ready["hybrid"] = False
+
+    gc.collect()
+
+    print(
+        "[face_server] ArcFace memory released before training [OK]",
+        flush=True
+    )
+
+
 def _run_training_script():
     """
     Run train_all_models.py so LBPH and ArcFace embedding generation
@@ -1591,8 +1619,8 @@ def _reload_after_training():
 
     recognizer = (
         cv2.face.LBPHFaceRecognizer_create(
-            radius=1,
-            neighbors=8,
+            radius=2,
+            neighbors=16,
             grid_x=8,
             grid_y=8
         )
@@ -1680,6 +1708,20 @@ def _do_train():
             _models_ready["lbph"] = False
             _models_ready["arcface"] = False
             _models_ready["hybrid"] = False
+
+        _write_status(
+            "running",
+            "Releasing ArcFace memory before training...",
+            22
+        )
+
+        _unload_arcface_for_training()
+
+        # Limit native thread pools to avoid unnecessary RAM use on Render.
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
         _write_status(
             "running",
