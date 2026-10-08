@@ -486,8 +486,8 @@ def _load_models():
         try:
             recognizer = (
                 cv2.face.LBPHFaceRecognizer_create(
-                    radius=2,
-                    neighbors=16,
+                    radius=1,
+                    neighbors=8,
                     grid_x=8,
                     grid_y=8
                 )
@@ -727,24 +727,40 @@ def _lbph_predict(face_roi):
         }
 
     try:
-        student_id, distance = model.predict(
-            face_roi
+        if face_roi is None or face_roi.size == 0:
+            raise ValueError("Empty face ROI.")
+
+        # EXACTLY match the LBPH training preprocessing:
+        # face crop -> grayscale -> 128x128 -> CLAHE.
+        if len(face_roi.shape) == 3:
+            gray = cv2.cvtColor(
+                face_roi,
+                cv2.COLOR_BGR2GRAY
+            )
+        else:
+            gray = face_roi
+
+        gray = cv2.resize(
+            gray,
+            (128, 128),
+            interpolation=cv2.INTER_AREA
         )
 
-        confidence = _lbph_confidence(
-            distance
+        clahe = cv2.createCLAHE(
+            clipLimit=2.0,
+            tileGridSize=(8, 8)
         )
+        gray = clahe.apply(gray)
+
+        student_id, distance = model.predict(gray)
+
+        confidence = _lbph_confidence(distance)
 
         return {
             "id": int(student_id),
             "confidence": confidence,
-            "distance": round(
-                float(distance),
-                4
-            ),
-            "matched": bool(
-                confidence >= LBPH_THRESHOLD
-            ),
+            "distance": round(float(distance), 4),
+            "matched": bool(confidence >= LBPH_THRESHOLD),
             "algorithm": "lbph"
         }
 
@@ -757,6 +773,7 @@ def _lbph_predict(face_roi):
             "algorithm": "lbph",
             "error": str(e)
         }
+
 
 
 # =============================================================================
@@ -1619,8 +1636,8 @@ def _reload_after_training():
 
     recognizer = (
         cv2.face.LBPHFaceRecognizer_create(
-            radius=2,
-            neighbors=16,
+            radius=1,
+            neighbors=8,
             grid_x=8,
             grid_y=8
         )
