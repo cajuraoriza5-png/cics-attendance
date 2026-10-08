@@ -21,10 +21,7 @@ Important:
 
 import os
 
-HYBRID_FUSION_VERSION = "ARCFACE_PRIMARY_LBPH_VERIFY_V4"
-# ArcFace is the final identity authority when LBPH and ArcFace disagree.
-# LBPH remains available for diagnostics and agreement verification.
-HYBRID_FUSION_VERSION = "HYBRID-LBPH-ARCFACE-V3"
+HYBRID_FUSION_VERSION = "SAME-STUDENT-SCORE-FUSION-V5"
 import sys
 import json
 import base64
@@ -113,6 +110,11 @@ MIN_FILE_BYTES = int(
 # =============================================================================
 
 _lbph = None
+# One-vs-student LBPH models are used only to score the SAME student
+# selected for the comparison. This prevents a different LBPH top-1 ID
+# from changing the student being compared.
+_lbph_student_models = {}
+_lbph_student_lock = threading.Lock()
 _arc_app = None
 _arc_embeddings = None
 _arc_labels = None
@@ -775,6 +777,149 @@ def _load_models():
 
 
 # =============================================================================
+# SAME-STUDENT LBPH SCORING
+# =============================================================================
+
+def _make_lbph_recognizer():
+    if not _opencv_face_available():
+        return None
+    return cv2.face.LBPHFaceRecognizer_create(
+        radius=1,
+        neighbors=8,
+        grid_x=8,
+        grid_y=8
+    )
+
+
+def _load_same_student_lbph_training_face(path):
+    """Load a training face using the same crop/preprocess used at runtime."""
+    try:
+        image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            return None
+
+        cascade = _cascade
+        if cascade is None or cascade.empty():
+            return _load_gray_face(path)
+
+        eq = cv2.equalizeHist(image)
+        detections = cascade.detectMultiScale(
+            eq, 1.1, 5, minSize=(40, 40)
+        )
+        if len(detections) == 0:
+            detections = cascade.detectMultiScale(
+                eq, 1.05, 3, minSize=(30, 30)
+            )
+
+        if len(detections) == 0:
+            return None
+
+        x, y, w, h = max(detections, key=lambda r: r[2] * r[3])
+        face = image[y:y+h, x:x+w]
+        if face is None or face.size == 0:
+            return None
+
+        face = cv2.resize(face, (100, 100), interpolation=cv2.INTER_AREA)
+        face = cv2.equalizeHist(face)
+        return face
+    except Exception:
+        return None
+
+
+def _build_same_student_lbph_models():
+    """Build one LBPH verifier per student.
+
+    These models are NOT used to choose a different identity. They answer one
+    question only: 'How well does this face match this specific student?'
+    That gives the Hybrid a fair LBPH score for the same student selected by
+    ArcFace, even when the normal multi-class LBPH top-1 prediction disagrees.
+    """
+    global _lbph_student_models
+
+    if not _opencv_face_available():
+        return False
+
+    files = _iter_face_files(FACES_DIR)
+    groups = {}
+    for path, sid, _ in files:
+        groups.setdefault(int(sid), []).append(path)
+
+    new_models = {}
+    for sid, paths in groups.items():
+        images = []
+        labels = []
+        for path in paths:
+            img = _load_same_student_lbph_training_face(path)
+            if img is None:
+                continue
+            images.append(img)
+            labels.append(int(sid))
+
+        if not images:
+            continue
+
+        try:
+            model = _make_lbph_recognizer()
+            model.train(images, np.asarray(labels, dtype=np.int32))
+            new_models[int(sid)] = model
+        except Exception as e:
+            print(f"[face_server] Same-student LBPH model failed for {sid}: {e}", flush=True)
+
+    with _lbph_student_lock:
+        _lbph_student_models = new_models
+
+    print(
+        f"[face_server] Same-student LBPH verifiers loaded: {len(new_models)} students",
+        flush=True
+    )
+    return bool(new_models)
+
+
+def _lbph_score_for_student(face_roi, student_id):
+    """Return LBPH score for a specific student, not LBPH's top-1 student."""
+    try:
+        sid = int(student_id)
+    except Exception:
+        return {
+            "student_id": -1,
+            "confidence": 0.0,
+            "distance": 999.0,
+            "available": False
+        }
+
+    with _lbph_student_lock:
+        model = _lbph_student_models.get(sid)
+
+    if model is None:
+        return {
+            "student_id": sid,
+            "confidence": 0.0,
+            "distance": 999.0,
+            "available": False
+        }
+
+    try:
+        if face_roi is None or face_roi.size == 0:
+            raise ValueError("Empty face ROI")
+        student_id_out, distance = model.predict(face_roi)
+        confidence = _lbph_confidence(distance)
+        return {
+            "student_id": sid,
+            "confidence": round(float(confidence), 1),
+            "distance": round(float(distance), 4),
+            "available": True
+        }
+    except Exception as e:
+        return {
+            "student_id": sid,
+            "confidence": 0.0,
+            "distance": 999.0,
+            "available": False,
+            "error": str(e)
+        }
+
+
+# =============================================================================
 # ARCFACE PREDICTION
 # =============================================================================
 
@@ -897,7 +1042,9 @@ def _lbph_predict(face_roi):
             "matched": bool(
                 confidence >= LBPH_THRESHOLD
             ),
-            "algorithm": "lbph"
+            "algorithm": "lbph",
+            "identity_type": "lbph_top1",
+            "note": "Use comparison_confidence for same-student algorithm comparison."
         }
 
     except Exception as e:
@@ -915,211 +1062,103 @@ def _lbph_predict(face_roi):
 # HYBRID ARC-FACE + LBPH
 # =============================================================================
 
-def _hybrid_predict(arc, lbph):
-    """
-    ArcFace-primary Hybrid decision.
+def _hybrid_predict(arc, lbph, same_student_lbph=None):
+    """Same-student score fusion.
 
-    IMPORTANT:
-    - ArcFace is the primary identity model.
-    - LBPH is a secondary verification/support signal.
-    - LBPH can NEVER replace an accepted ArcFace identity.
-    - If LBPH and ArcFace disagree, Hybrid keeps the ArcFace identity.
-    - A different LBPH candidate is reported for diagnostics only.
-    - Confidence is allowed to change from frame to frame; it is not
-      compared with the previous frame.
+    The comparison identity is ArcFace's candidate. LBPH is then scored for
+    THAT SAME candidate using a one-vs-student verifier. LBPH's normal top-1
+    result is still returned separately for diagnostics, but it can never
+    replace the comparison identity.
     """
-
     arc_id = int(arc.get("id", -1)) if arc else -1
-    lbph_id = int(lbph.get("id", -1)) if lbph else -1
+    arc_conf = float(arc.get("confidence", 0.0)) if arc else 0.0
+    arc_sim = float(arc.get("similarity", 0.0)) if arc else 0.0
+    arc_pass = bool(arc and arc.get("matched") and arc_id > 0)
 
-    arc_confidence = float(arc.get("confidence", 0.0)) if arc else 0.0
-    lbph_confidence = float(lbph.get("confidence", 0.0)) if lbph else 0.0
-    arc_similarity = float(arc.get("similarity", 0.0)) if arc else 0.0
+    lbph_top_id = int(lbph.get("id", -1)) if lbph else -1
+    lbph_top_conf = float(lbph.get("confidence", 0.0)) if lbph else 0.0
 
-    arc_pass = bool(
-        arc
-        and arc.get("matched")
-        and arc_id > 0
-    )
-
-    lbph_pass = bool(
-        lbph
-        and lbph.get("matched")
-        and lbph_id > 0
-    )
-
-    same_identity = (
-        arc_pass
-        and lbph_pass
-        and arc_id == lbph_id
-    )
-
-    disagreement = (
-        arc_pass
-        and lbph_pass
-        and arc_id != lbph_id
-    )
-
-    # ------------------------------------------------------------------
-    # CASE 1: ArcFace does not pass.
-    #
-    # Do NOT let a random LBPH candidate become the final Hybrid identity.
-    # This is important because LBPH can produce a plausible-looking
-    # candidate even when it is not actually the correct student.
-    # ------------------------------------------------------------------
     if not arc_pass:
         return {
             "id": -1,
-            "confidence": round(max(0.0, arc_confidence), 1),
+            "comparison_id": -1,
+            "confidence": 0.0,
             "matched": False,
             "algorithm": "hybrid",
-            "reason": "ArcFace threshold not reached; LBPH cannot override ArcFace",
-            "arcface_confidence": round(arc_confidence, 1),
-            "arcface_similarity": round(arc_similarity, 5),
-            "lbph_confidence": round(lbph_confidence, 1),
-            "lbph_id": lbph_id if lbph_id > 0 else -1,
+            "reason": "ArcFace did not produce an accepted candidate",
+            "arcface_confidence": round(arc_conf, 1),
+            "arcface_similarity": round(arc_sim, 5),
+            "lbph_top1_id": lbph_top_id,
+            "lbph_top1_confidence": round(lbph_top_conf, 1),
+            "lbph_same_student_confidence": 0.0,
             "agreement": False,
-            "consensus": False,
-            "fusion_method": "ArcFace primary; LBPH cannot override"
+            "fusion_method": "60% ArcFace + 40% LBPH same-student score"
         }
 
-    # ------------------------------------------------------------------
-    # CASE 2: ArcFace and LBPH agree.
-    #
-    # Both models support the same enrolled student, so a normal fusion
-    # score is used. The final identity is ArcFace's identity.
-    # ------------------------------------------------------------------
-    if same_identity:
-        hybrid_score = (
-            arc_confidence * 0.75
-            + lbph_confidence * 0.25
-        )
+    same = same_student_lbph or {}
+    lbph_same_conf = float(same.get("confidence", 0.0))
+    available = bool(same.get("available", False))
 
-        hybrid_score = min(99.9, max(0.0, hybrid_score))
+    # Fixed weights for a transparent thesis comparison.
+    hybrid_score = (0.60 * arc_conf) + (0.40 * lbph_same_conf)
+    hybrid_score = round(max(0.0, min(99.9, hybrid_score)), 1)
 
-        return {
-            "id": arc_id,
-            "confidence": round(hybrid_score, 1),
-            "matched": bool(hybrid_score >= HYBRID_THRESHOLD),
-            "algorithm": "hybrid",
-            "reason": "ArcFace + LBPH agree on the same student",
-            "arcface_confidence": round(arc_confidence, 1),
-            "arcface_similarity": round(arc_similarity, 5),
-            "lbph_confidence": round(lbph_confidence, 1),
-            "lbph_id": lbph_id,
-            "agreement": True,
-            "consensus": True,
-            "fusion_method": "75% ArcFace + 25% LBPH agreement"
-        }
+    # Agreement is diagnostic only: it is not used to substitute identities.
+    agreement = bool(lbph_top_id > 0 and lbph_top_id == arc_id)
 
-    # ------------------------------------------------------------------
-    # CASE 3: ArcFace passes but LBPH identifies a DIFFERENT student.
-    #
-    # This is the case you are experiencing.
-    #
-    # Example:
-    #   ArcFace -> Student 21, 88%
-    #   LBPH    -> Student 08, 95%
-    #
-    # The old fusion could allow the stronger LBPH candidate to influence
-    # the final identity. That is unsafe.
-    #
-    # New behavior:
-    #   Hybrid -> Student 21
-    #
-    # LBPH remains visible as a diagnostic result, but cannot override
-    # ArcFace's identity.
-    # ------------------------------------------------------------------
-    if disagreement:
-        # Use ArcFace confidence as the identity confidence. We apply only
-        # a small reliability adjustment when LBPH disagrees; importantly,
-        # the identity remains ArcFace's ID.
-        #
-        # Strong ArcFace similarity is required when the secondary model
-        # disagrees. This reduces false acceptance without allowing LBPH
-        # to select a different student.
-        strong_arc = (
-            arc_similarity
-            >= max(
-                ARCFACE_THRESHOLD + 0.08,
-                0.63
-            )
-        )
-
-        # Do not let the incorrect LBPH confidence increase the final
-        # confidence. The displayed Hybrid score is based on ArcFace only
-        # in a disagreement case.
-        hybrid_score = min(
-            99.9,
-            max(0.0, arc_confidence)
-        )
-
-        return {
-            "id": arc_id,
-            "confidence": round(hybrid_score, 1),
-            "matched": bool(
-                strong_arc
-                and hybrid_score >= HYBRID_THRESHOLD
-            ),
-            "algorithm": "hybrid",
-            "reason": (
-                "ArcFace primary; LBPH identified a different student"
-            ),
-            "arcface_confidence": round(arc_confidence, 1),
-            "arcface_similarity": round(arc_similarity, 5),
-            "lbph_confidence": round(lbph_confidence, 1),
-            "lbph_id": lbph_id,
-            "agreement": False,
-            "consensus": False,
-            "lbph_disagreement": True,
-            "fusion_method": "ArcFace primary; LBPH disagreement cannot override"
-        }
-
-    # ------------------------------------------------------------------
-    # CASE 4: ArcFace passes but LBPH has no valid candidate / does not pass.
-    #
-    # ArcFace remains the final identity. A weak or missing LBPH result
-    # does not cause a different student to be selected.
-    # ------------------------------------------------------------------
-    strong_arc = (
-        arc_similarity
-        >= max(
-            ARCFACE_THRESHOLD + 0.08,
-            0.63
-        )
-    )
-
-    hybrid_score = min(
-        99.9,
-        max(0.0, arc_confidence)
+    # A Hybrid match requires both component scores to meet their own
+    # thresholds. This prevents a very high ArcFace score from hiding a very
+    # weak LBPH verification score.
+    hybrid_pass = bool(
+        available
+        and arc_conf >= HYBRID_THRESHOLD
+        and lbph_same_conf >= LBPH_THRESHOLD
+        and hybrid_score >= HYBRID_THRESHOLD
     )
 
     return {
         "id": arc_id,
-        "confidence": round(hybrid_score, 1),
-        "matched": bool(
-            strong_arc
-            and hybrid_score >= HYBRID_THRESHOLD
-        ),
+        "comparison_id": arc_id,
+        "confidence": hybrid_score,
+        "matched": hybrid_pass,
         "algorithm": "hybrid",
-        "reason": (
-            "ArcFace primary; LBPH did not verify"
-        ),
-        "arcface_confidence": round(arc_confidence, 1),
-        "arcface_similarity": round(arc_similarity, 5),
-        "lbph_confidence": round(lbph_confidence, 1),
-        "lbph_id": lbph_id if lbph_id > 0 else -1,
-        "agreement": False,
-        "consensus": False,
-        "fusion_method": "ArcFace primary; LBPH secondary verification"
+        "reason": "Same-student score fusion",
+        "arcface_confidence": round(arc_conf, 1),
+        "arcface_similarity": round(arc_sim, 5),
+        "lbph_same_student_confidence": round(lbph_same_conf, 1),
+        "lbph_same_student_distance": same.get("distance", 999.0),
+        "lbph_top1_id": lbph_top_id,
+        "lbph_top1_confidence": round(lbph_top_conf, 1),
+        "agreement": agreement,
+        "lbph_verifier_available": available,
+        "fusion_method": "60% ArcFace + 40% LBPH same-student score"
     }
+
 
 def _recognize_face(face_color, face_roi):
     arc = _arcface_predict(face_color)
     lbph = _lbph_predict(face_roi)
-    hybrid = _hybrid_predict(
-        arc,
-        lbph
+
+    same_student = None
+    if arc.get("id", -1) > 0:
+        same_student = _lbph_score_for_student(face_roi, arc["id"])
+
+    hybrid = _hybrid_predict(arc, lbph, same_student)
+
+    # Expose a same-student LBPH value without pretending that LBPH's
+    # independent top-1 prediction was the same person.
+    lbph["comparison_id"] = int(arc.get("id", -1))
+    lbph["comparison_confidence"] = round(
+        float(same_student.get("confidence", 0.0)) if same_student else 0.0,
+        1
+    )
+    lbph["comparison_distance"] = (
+        same_student.get("distance", 999.0) if same_student else 999.0
+    )
+    lbph["comparison_is_same_student"] = bool(
+        arc.get("id", -1) > 0
+        and same_student
+        and same_student.get("available", False)
     )
 
     return arc, lbph, hybrid
@@ -1834,6 +1873,8 @@ def _reload_after_training():
             "ArcFace embedding database was not created."
         )
 
+    _build_same_student_lbph_models()
+
     with _lock:
         _models_ready["hybrid"] = True
 
@@ -2108,6 +2149,12 @@ def reload_models():
         loaded["arcface"] = False
         loaded["arcface_error"] = str(e)
 
+    try:
+        loaded["same_student_lbph"] = _build_same_student_lbph_models()
+    except Exception as e:
+        loaded["same_student_lbph"] = False
+        loaded["same_student_lbph_error"] = str(e)
+
     with _lock:
         _models_ready["hybrid"] = (
             _models_ready["lbph"]
@@ -2228,6 +2275,11 @@ def _load_render_lightweight_models():
             flush=True
         )
         _set_ready("arcface", False)
+
+    try:
+        _build_same_student_lbph_models()
+    except Exception as e:
+        print(f"[face_server] Same-student LBPH startup build failed: {e}", flush=True)
 
     with _lock:
         _models_ready["hybrid"] = (
