@@ -868,9 +868,52 @@ def main():
             db=np.load(ARC_DB,allow_pickle=False); arc_result={'ok':True,'samples':int(len(db['embeddings'])),'students':int(len(np.unique(db['labels']))),'reused':int(len(db['embeddings'])),'generated':0,'cache_only':True}; db.close(); update_status('running','ArcFace cache current. Skipping embedding generation.',88,{'lbph':lbph_result,'arcface':arc_result})
         else:
             update_status('running','Loading ArcFace for new/changed images...',38,{'lbph':lbph_result}); arc_model=get_arcface(); arc_result=train_arcface(files,arc_model); del arc_model; gc.collect(); update_status('running',f'ArcFace ready: {arc_result["generated"]} generated / {arc_result["reused"]} reused.',88,{'lbph':lbph_result,'arcface':arc_result})
-        hybrid={'ok':os.path.exists(TRAINER) and os.path.exists(ARC_DB),'type':'decision_fusion','threshold':80.0}; result={'lbph':lbph_result,'arcface':arc_result,'hybrid':hybrid,'accuracy':{'validation_skipped':True,'reason':'Fast training mode'},'samples':len(files),'students':len(counts),'dropped_students':dropped}
-        if not hybrid['ok']: raise RuntimeError('Required model files were not created.')
-        update_status('done','FAST training completed. LBPH + ArcFace + Hybrid ready at 80%.',100,result); return 0
+        hybrid={'ok':os.path.exists(TRAINER) and os.path.exists(ARC_DB),'type':'decision_fusion','threshold':80.0}
+
+        # ---------------------------------------------------------------
+        # FAST OVERALL ACCURACY REPORT
+        # ---------------------------------------------------------------
+        # This uses the already-created LBPH model and ArcFace embeddings.
+        # It does NOT retrain either model and does NOT run a second
+        # ArcFace inference pass, so it remains fast on Render.
+        update_status(
+            'running',
+            'Calculating overall accuracy for LBPH, ArcFace and Hybrid...',
+            92,
+            {'lbph':lbph_result,'arcface':arc_result,'hybrid':hybrid}
+        )
+
+        accuracy = evaluate_validation(files)
+
+        # Add clear labels so the dashboard knows these are validation/
+        # consistency metrics, not training-loss percentages.
+        accuracy['threshold'] = 80.0
+        accuracy['metric_note'] = (
+            'Overall recognition accuracy calculated after model preparation. '
+            'Fast mode uses saved ArcFace embeddings and a small LBPH/Hybrid '
+            'validation sample; it does not retrain the models.'
+        )
+
+        result={
+            'lbph':lbph_result,
+            'arcface':arc_result,
+            'hybrid':hybrid,
+            'accuracy':accuracy,
+            'samples':len(files),
+            'students':len(counts),
+            'dropped_students':dropped
+        }
+
+        if not hybrid['ok']:
+            raise RuntimeError('Required model files were not created.')
+
+        update_status(
+            'done',
+            'FAST training completed. LBPH + ArcFace + Hybrid ready at 80%.',
+            100,
+            result
+        )
+        return 0
     except Exception as e:
         traceback.print_exc(); update_status('error',f'Training failed: {e}',0,{'error':str(e)}); return 1
 
