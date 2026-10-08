@@ -32,9 +32,14 @@ Output:
 """
 
 import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 import json
 import time
 import traceback
+import gc
 import re
 from collections import Counter
 
@@ -581,7 +586,7 @@ def train_arcface(files, model):
     labels = []
     failed = []
     total = len(files)
-    batch_size = int(os.environ.get("ARCFACE_BATCH_SIZE", "8"))
+    batch_size = int(os.environ.get("ARCFACE_BATCH_SIZE", "2"))
 
     cascade = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -664,6 +669,7 @@ def train_arcface(files, model):
             failed.append(filename)
 
     flush_batch()
+    gc.collect()
 
     if not embeddings:
         raise RuntimeError("ArcFace could not generate any embeddings.")
@@ -684,6 +690,13 @@ def train_arcface(files, model):
     gc.collect()
 
     print(f"[train] ArcFace DB saved: {ARC_DB}", flush=True)
+
+    # Release the heavy ArcFace model before the process exits.
+    try:
+        del model
+    except Exception:
+        pass
+    gc.collect()
 
     return {
         "ok": True,
