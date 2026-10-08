@@ -558,9 +558,12 @@ def train_arcface(files, model):
 
     embeddings = []
     labels = []
+    embedding_files = []
     failed = []
     total = len(files)
-    batch_size = max(1, int(os.environ.get("ARCFACE_BATCH_SIZE", "1")))
+    # Render Free has only 512 MB. Force one image per ONNX inference so
+    # the ONNX output shape always remains (1, 512).
+    batch_size = 1
 
     cascade = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -574,20 +577,44 @@ def train_arcface(files, model):
         if not batch_faces:
             return
 
-        features = model.get_feat(batch_faces)
+        # Always infer exactly one face. This prevents ONNX Runtime from
+        # receiving an accidental batch of 2, 3, 4... images if an exception
+        # occurs during result handling.
+        face_input = batch_faces[0]
+        label = batch_labels[0]
+        name = batch_names[0]
 
-        for emb, label, name in zip(features, batch_labels, batch_names):
-            norm = normalize_embedding(emb)
+        try:
+            features = model.get_feat([face_input])
+            features = np.asarray(features, dtype=np.float32)
+
+            if features.ndim == 1:
+                features = features.reshape(1, -1)
+
+            if features.ndim != 2 or features.shape[0] < 1:
+                raise ValueError(
+                    f"Unexpected ArcFace output shape: {features.shape}"
+                )
+
+            norm = normalize_embedding(features[0])
             if norm is None:
                 failed.append(name)
-                continue
-            embeddings.append(norm)
-            labels.append(label)
-            embedding_files.append(name)
+            else:
+                embeddings.append(norm)
+                labels.append(label)
+                embedding_files.append(name)
 
-        batch_faces.clear()
-        batch_labels.clear()
-        batch_names.clear()
+        except Exception as e:
+            failed.append(name)
+            print(
+                f"[train] ArcFace failed for {name}: {e}",
+                flush=True
+            )
+        finally:
+            batch_faces.clear()
+            batch_labels.clear()
+            batch_names.clear()
+            gc.collect()
 
     for index, (path, student_id, filename) in enumerate(files, start=1):
         try:
@@ -1326,6 +1353,7 @@ def main():
         lbph_result = train_lbph(
             files
         )
+        gc.collect()
 
         # Explicitly mark LBPH as finished before any ArcFace work begins.
         update_status(
@@ -1335,75 +1363,14 @@ def main():
             {"lbph": lbph_result}
         )
 
-        # Hold-out validation is reported separately from training accuracy.
-        # This gives a more meaningful estimate of recognition performance.
-        update_status(
-            "running",
-            "LBPH completed. Preparing validation accuracy...",
-            34,
-            {
-                "lbph": lbph_result
-            }
-        )
-
-        lbph_validation = None
-        try:
-            _, val_files_preview = _validation_split(files)
-            if val_files_preview:
-                # A temporary ArcFace model is not needed yet; calculate LBPH
-                # validation directly with a temporary held-out model.
-                train_val_files, val_only = _validation_split(files)
-                vf, vl = [], []
-                for vpath, vsid, _ in train_val_files:
-                    img = load_gray_face(vpath)
-                    if img is not None:
-                        vf.append(img)
-                        vl.append(vsid)
-                temp_lb = None
-                if vf and len(set(vl)) >= 2:
-                    temp_lb = cv2.face.LBPHFaceRecognizer_create(
-                        radius=1, neighbors=8, grid_x=8, grid_y=8
-                    )
-                    temp_lb.train(vf, np.asarray(vl, dtype=np.int32))
-
-                correct = total = 0
-                for vpath, vsid, _ in val_only:
-                    img = load_gray_face(vpath)
-                    if img is None or temp_lb is None:
-                        continue
-                    pred, _ = temp_lb.predict(img)
-                    total += 1
-                    correct += int(int(pred) == int(vsid))
-
-                if total:
-                    lbph_validation = {
-                        "accuracy": round(correct / total * 100.0, 1),
-                        "validation_images": total
-                    }
-                    lbph_result["validation_accuracy"] = lbph_validation["accuracy"]
-                    update_status(
-                        "running",
-                        f"LBPH validation accuracy: {lbph_validation['accuracy']:.1f}%",
-                        35,
-                        {
-                            "lbph": lbph_result,
-                            "accuracy": {"lbph": lbph_validation}
-                        }
-                    )
-        except Exception as validation_error:
-            print(
-                f"[train] LBPH validation warning: {validation_error}",
-                flush=True
-            )
-
+        # 80/20 validation is performed once after ArcFace embeddings are
+        # generated. This avoids keeping a temporary LBPH model and image
+        # arrays alive during ArcFace processing.
         update_status(
             "running",
             "LBPH completed successfully. Loading ArcFace...",
             36,
-            {
-                "lbph": lbph_result,
-                "accuracy": {"lbph": lbph_validation} if lbph_validation else {}
-            }
+            {"lbph": lbph_result}
         )
 
         # ---------------------------------------------------------
@@ -1419,10 +1386,7 @@ def main():
 
         # Free the ArcFace ONNX model before validation. Render has only 512 MB
         # and the training process must not keep a second large model alive.
-        try:
-            del arc_model
-        except Exception:
-            pass
+        arc_model = None
         gc.collect()
 
         # Validate using the embeddings already produced above. This avoids
