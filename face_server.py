@@ -1195,41 +1195,126 @@ def status():
 # FACE DETECTION
 # =============================================================================
 
-def _detect_largest_face(frame):
-    if frame is None or _cascade is None:
-        return None
 
-    gray = cv2.cvtColor(
-        frame,
-        cv2.COLOR_BGR2GRAY
-    )
+def _safe_detect_faces(frame):
+    """
+    Thread-safe Haar detection.
 
-    gray_eq = cv2.equalizeHist(
-        gray
-    )
+    OpenCV can raise:
+      (-215:Assertion failed) 0 <= scaleIdx && scaleIdx < scaleData.size()
 
-    detections = _cascade.detectMultiScale(
-        gray_eq,
-        1.1,
-        5,
-        minSize=(40, 40)
-    )
+    when the classifier/image state is invalid during a concurrent request or
+    when an invalid/too-small frame reaches detectMultiScale().  Recognition
+    should return "no face" instead of HTTP 500.
+    """
+    global _cascade
 
-    if len(detections) == 0:
-        detections = _cascade.detectMultiScale(
-            gray_eq,
-            1.05,
-            3,
-            minSize=(30, 30)
+    if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+        return []
+
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        return []
+
+    height, width = frame.shape[:2]
+
+    if width < 32 or height < 32:
+        return []
+
+    def _run(cascade, image):
+        if cascade is None or cascade.empty():
+            return None
+
+        detections = cascade.detectMultiScale(
+            image,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(40, 40)
         )
 
-    if len(detections) == 0:
+        if len(detections) == 0:
+            detections = cascade.detectMultiScale(
+                image,
+                scaleFactor=1.05,
+                minNeighbors=3,
+                minSize=(30, 30)
+            )
+
+        return detections
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    if gray is None or gray.size == 0:
+        return []
+
+    gray_eq = cv2.equalizeHist(gray)
+
+    # CascadeClassifier is protected by the same lock used for model reloads.
+    with _lock:
+        cascade = _cascade
+
+        try:
+            detections = _run(cascade, gray_eq)
+        except cv2.error as first_error:
+            # Recreate the classifier once and retry. This also protects
+            # against a bad classifier object left during worker startup.
+            print(
+                f"[face_server] Haar detection retry after OpenCV error: {first_error}",
+                flush=True
+            )
+
+            try:
+                fresh = cv2.CascadeClassifier(
+                    cv2.data.haarcascades +
+                    "haarcascade_frontalface_default.xml"
+                )
+
+                if fresh.empty():
+                    print(
+                        "[face_server] Haar classifier reload failed.",
+                        flush=True
+                    )
+                    return []
+
+                _cascade = fresh
+                detections = _run(fresh, gray_eq)
+
+            except cv2.error as second_error:
+                print(
+                    f"[face_server] Haar detection failed safely: {second_error}",
+                    flush=True
+                )
+                return []
+            except Exception as second_error:
+                print(
+                    f"[face_server] Haar detection retry failed safely: {second_error}",
+                    flush=True
+                )
+                return []
+        except Exception as error:
+            print(
+                f"[face_server] Haar detection failed safely: {error}",
+                flush=True
+            )
+            return []
+
+    if detections is None:
+        return []
+
+    return detections
+
+
+def _largest_face_from_detections(detections):
+    if detections is None or len(detections) == 0:
         return None
 
     return max(
         detections,
-        key=lambda r: r[2] * r[3]
+        key=lambda r: int(r[2]) * int(r[3])
     )
+
+
+def _detect_largest_face(frame):
+    detections = _safe_detect_faces(frame)
+    return _largest_face_from_detections(detections)
 
 
 @app.route("/detect", methods=["POST"])
@@ -1277,27 +1362,7 @@ def detect():
             "faces_count": 0
         })
 
-    gray = cv2.equalizeHist(
-        cv2.cvtColor(
-            frame,
-            cv2.COLOR_BGR2GRAY
-        )
-    )
-
-    detections = _cascade.detectMultiScale(
-        gray,
-        1.1,
-        5,
-        minSize=(40, 40)
-    )
-
-    if len(detections) == 0:
-        detections = _cascade.detectMultiScale(
-            gray,
-            1.05,
-            3,
-            minSize=(30, 30)
-        )
+    detections = _safe_detect_faces(frame)
 
     if len(detections) == 0:
         return jsonify({
@@ -1305,10 +1370,7 @@ def detect():
             "faces_count": 0
         })
 
-    x, y, w, h = max(
-        detections,
-        key=lambda r: r[2] * r[3]
-    )
+    x, y, w, h = _largest_face_from_detections(detections)
 
     return jsonify({
         "bbox": {
@@ -1386,29 +1448,8 @@ def recognize():
         }), 503
 
     # Detect face
-    gray = cv2.cvtColor(
-        frame,
-        cv2.COLOR_BGR2GRAY
-    )
-
-    gray_eq = cv2.equalizeHist(
-        gray
-    )
-
-    detections = _cascade.detectMultiScale(
-        gray_eq,
-        1.1,
-        5,
-        minSize=(40, 40)
-    )
-
-    if len(detections) == 0:
-        detections = _cascade.detectMultiScale(
-            gray_eq,
-            1.05,
-            3,
-            minSize=(30, 30)
-        )
+    # Detect face safely. OpenCV detector errors must never become HTTP 500.
+    detections = _safe_detect_faces(frame)
 
     result["faces_count"] = int(
         len(detections)
@@ -1442,10 +1483,7 @@ def recognize():
 
         return jsonify(result)
 
-    x, y, w, h = max(
-        detections,
-        key=lambda r: r[2] * r[3]
-    )
+    x, y, w, h = _largest_face_from_detections(detections)
 
     result["bbox"] = {
         "x": int(x),
