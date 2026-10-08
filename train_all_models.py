@@ -550,7 +550,7 @@ def train_arcface(files, model):
     labels = []
     failed = []
     total = len(files)
-    batch_size = int(os.environ.get("ARCFACE_BATCH_SIZE", "8"))
+    batch_size = 1  # InsightFace ONNX model expects one face per inference
 
     cascade = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -755,283 +755,388 @@ def _arcface_display_score(similarity):
     return max(0.0, min(100.0, value))
 
 
-def evaluate_validation(files, validation_ratio=0.20):
+def evaluate_validation(files, arc_model=None):
     """
-    Proper 80/20 hold-out validation for LBPH, ArcFace and Hybrid.
+    Proper deterministic 80/20 hold-out validation.
 
-    - A deterministic 80/20 split is created separately for every student.
-    - LBPH is trained temporarily using ONLY the 80% training images.
-    - ArcFace is a pretrained/fixed model, so its saved embeddings are used,
-      but validation images are compared ONLY against embeddings belonging to
-      the 80% training split. Validation identities are never used as
-      reference embeddings.
-    - Hybrid combines the hold-out ArcFace and LBPH predictions.
+    ArcFace:
+      - Uses the already-generated pretrained ArcFace embeddings.
+      - Validation embeddings are compared ONLY against training embeddings.
+      - The validation image is never used as its own reference.
 
-    The production models are still trained on ALL images after validation.
+    LBPH:
+      - A temporary LBPH model is trained ONLY on the 80% training split.
+      - The 20% validation images are then predicted.
+
+    Hybrid:
+      - Uses the ArcFace prediction + LBPH prediction on the same held-out
+        images and applies an 80% hybrid acceptance threshold.
+      - Rejected validation samples count as incorrect for accuracy.
+
+    This is a true hold-out evaluation for the recognition pipeline.
     """
     try:
-        train_files, val_files = _validation_split(
-            files,
-            validation_ratio=validation_ratio
-        )
+        train_files, val_files = _validation_split(files, 0.20)
 
         if not train_files or not val_files:
             return {
                 "available": False,
-                "reason": "Could not create an 80/20 hold-out split."
+                "reason": "Could not create a non-empty 80/20 train/validation split."
             }
 
-        train_names = {str(item[2]) for item in train_files}
-        val_names = {str(item[2]) for item in val_files}
-
         # ------------------------------------------------------------------
-        # LBPH: train a temporary model using ONLY the 80% training split.
-        # ------------------------------------------------------------------
-        train_faces = []
-        train_labels = []
-
-        for path, student_id, _ in train_files:
-            image = load_gray_face(path)
-            if image is None:
-                continue
-            train_faces.append(image)
-            train_labels.append(int(student_id))
-
-        if not train_faces or len(set(train_labels)) < 2:
-            return {
-                "available": False,
-                "reason": "Not enough valid training images for hold-out LBPH."
-            }
-
-        lb_model = cv2.face.LBPHFaceRecognizer_create(
-            radius=1,
-            neighbors=8,
-            grid_x=8,
-            grid_y=8
-        )
-        lb_model.train(
-            train_faces,
-            np.asarray(train_labels, dtype=np.int32)
-        )
-
-        # ------------------------------------------------------------------
-        # ArcFace: use the saved production embeddings, but only training
-        # embeddings are allowed to be reference examples.
+        # Load the saved ArcFace embeddings.
         # ------------------------------------------------------------------
         db = np.load(ARC_DB, allow_pickle=False)
-        arc_embeddings = np.asarray(
-            db["embeddings"], dtype=np.float32
-        )
-        arc_labels = np.asarray(
-            db["labels"], dtype=np.int32
-        )
+        arc_embeddings = np.asarray(db["embeddings"], dtype=np.float32)
+        arc_labels = np.asarray(db["labels"], dtype=np.int32)
+
         if "filenames" not in db.files:
-            db.close()
             return {
                 "available": False,
-                "reason": "ArcFace embedding database has no filenames."
+                "reason": "ArcFace database has no filenames for hold-out split."
             }
-        db_filenames = np.asarray(
-            db["filenames"], dtype=str
-        )
-        db.close()
 
+        db_filenames = np.asarray(db["filenames"], dtype=str)
+
+        if len(arc_embeddings) != len(db_filenames):
+            return {
+                "available": False,
+                "reason": "ArcFace embeddings and filenames have different lengths."
+            }
+
+        # Normalize once for cosine similarity.
         norms = np.linalg.norm(
             arc_embeddings,
             axis=1,
             keepdims=True
         )
-        arc_embeddings = arc_embeddings / np.maximum(
-            norms,
-            1e-8
-        )
+        arc_embeddings = arc_embeddings / np.maximum(norms, 1e-8)
 
-        train_indices = [
-            i for i, name in enumerate(db_filenames.tolist())
-            if str(name) in train_names
-        ]
-
-        val_indices = {
-            str(name): i
+        filename_to_index = {
+            str(name): int(i)
             for i, name in enumerate(db_filenames.tolist())
-            if str(name) in val_names
         }
 
-        if not train_indices:
+        train_names = {
+            str(item[2])
+            for item in train_files
+        }
+
+        val_names = {
+            str(item[2])
+            for item in val_files
+        }
+
+        train_indices = [
+            filename_to_index[name]
+            for name in train_names
+            if name in filename_to_index
+        ]
+
+        val_indices = [
+            filename_to_index[name]
+            for name in val_names
+            if name in filename_to_index
+        ]
+
+        if not train_indices or not val_indices:
             return {
                 "available": False,
-                "reason": "No ArcFace training embeddings matched the 80% split."
+                "reason": "No matching training/validation embeddings found."
             }
 
-        ref_embeddings = arc_embeddings[train_indices]
-        ref_labels = arc_labels[train_indices]
+        train_index_set = set(train_indices)
 
         # ------------------------------------------------------------------
-        # Test every held-out image.
+        # Temporary LBPH model trained ONLY on the 80% training images.
+        # ------------------------------------------------------------------
+        lb_model = None
+        lbph_train_images = []
+        lbph_train_labels = []
+
+        for path, sid, _ in train_files:
+            gray = load_gray_face(path)
+            if gray is not None:
+                lbph_train_images.append(gray)
+                lbph_train_labels.append(int(sid))
+
+        if (
+            lbph_train_images
+            and len(set(lbph_train_labels)) >= 2
+            and _opencv_face_available()
+        ):
+            lb_model = cv2.face.LBPHFaceRecognizer_create(
+                radius=1,
+                neighbors=8,
+                grid_x=8,
+                grid_y=8
+            )
+            lb_model.train(
+                lbph_train_images,
+                np.asarray(lbph_train_labels, dtype=np.int32)
+            )
+
+        # ------------------------------------------------------------------
+        # Thresholds match the runtime configuration.
+        # Hybrid validation uses 80% as requested.
+        # ------------------------------------------------------------------
+        arc_threshold = float(
+            os.environ.get("ARCFACE_THRESHOLD", "0.55")
+        )
+        lbph_threshold = float(
+            os.environ.get("LBPH_THRESHOLD", "60.0")
+        )
+        hybrid_threshold = 80.0
+
+        # ------------------------------------------------------------------
+        # Evaluate every available held-out image.
         # ------------------------------------------------------------------
         arc_correct = 0
         arc_total = 0
+
         lb_correct = 0
         lb_total = 0
+
         hybrid_correct = 0
         hybrid_total = 0
         hybrid_accepted = 0
         hybrid_accepted_correct = 0
-        consensus = 0
-        skipped = 0
+        hybrid_agreements = 0
 
-        for path, true_id, filename in val_files:
-            true_id = int(true_id)
+        # filename -> validation item for deterministic evaluation
+        val_by_name = {
+            str(filename): (path, int(sid), str(filename))
+            for path, sid, filename in val_files
+        }
 
-            try:
-                # ArcFace hold-out prediction.
-                val_idx = val_indices.get(str(filename))
-                if val_idx is None:
-                    skipped += 1
-                    continue
+        for filename, (path, true_id, _) in sorted(val_by_name.items()):
+            db_i = filename_to_index.get(filename)
 
-                val_embedding = arc_embeddings[val_idx]
-                sims = np.dot(ref_embeddings, val_embedding)
-                best = int(np.argmax(sims))
-                arc_id = int(ref_labels[best])
-                best_similarity = float(sims[best])
-                arc_conf = _arcface_display_score(best_similarity)
+            if db_i is None:
+                continue
 
-                # ArcFace's recognition threshold is kept at the current
-                # production default (0.55 similarity).
-                arc_pass = best_similarity >= float(
-                    os.environ.get("ARCFACE_THRESHOLD", "0.55")
-                )
-                arc_prediction = arc_id if arc_pass else -1
+            # --------------------------------------------------------------
+            # ArcFace: validation embedding vs TRAINING embeddings only.
+            # --------------------------------------------------------------
+            query = arc_embeddings[db_i]
 
-                arc_total += 1
-                arc_correct += int(arc_prediction == true_id)
+            train_matrix = arc_embeddings[train_indices]
+            similarities = np.dot(
+                train_matrix,
+                query
+            )
 
-                # LBPH hold-out prediction.
+            best_pos = int(np.argmax(similarities))
+            best_train_index = int(train_indices[best_pos])
+
+            best_similarity = float(similarities[best_pos])
+            arc_pred = int(arc_labels[best_train_index])
+
+            arc_confidence = _arcface_display_score(
+                best_similarity
+            )
+
+            arc_pass = (
+                best_similarity >= arc_threshold
+                and arc_pred > 0
+            )
+
+            arc_total += 1
+            arc_correct += int(
+                arc_pass and arc_pred == true_id
+            )
+
+            # --------------------------------------------------------------
+            # LBPH: held-out image vs temporary 80% LBPH model.
+            # --------------------------------------------------------------
+            lb_pred = -1
+            lb_confidence = 0.0
+
+            if lb_model is not None:
                 gray = load_gray_face(path)
-                if gray is None:
-                    skipped += 1
-                    continue
 
-                lb_id_raw, distance = lb_model.predict(gray)
-                lb_conf = _lbph_score(distance)
-                lb_pass = lb_conf >= float(
-                    os.environ.get("LBPH_THRESHOLD", "60.0")
-                )
-                lb_prediction = int(lb_id_raw) if lb_pass else -1
+                if gray is not None:
+                    try:
+                        predicted, distance = lb_model.predict(gray)
+                        lb_pred = int(predicted)
+                        lb_confidence = _lbph_score(distance)
+                    except Exception:
+                        lb_pred = -1
+                        lb_confidence = 0.0
 
+            if lb_pred > 0:
                 lb_total += 1
-                lb_correct += int(lb_prediction == true_id)
-
-                # Hybrid decision mirrors the current ArcFace-primary +
-                # LBPH-secondary logic, with the requested 80% acceptance
-                # threshold used for the final hybrid result.
-                if arc_prediction <= 0:
-                    hybrid_id = -1
-                    hybrid_score = arc_conf
-                    hybrid_valid = False
-                elif lb_prediction > 0 and lb_prediction == arc_prediction:
-                    hybrid_id = arc_prediction
-                    consensus += 1
-                    hybrid_score = (
-                        arc_conf * 0.75
-                        + lb_conf * 0.25
-                    )
-                    hybrid_valid = hybrid_score >= 80.0
-                else:
-                    hybrid_id = arc_prediction
-                    hybrid_score = (
-                        arc_conf * 0.85
-                        + lb_conf * 0.15
-                    )
-                    strong_arc = best_similarity >= max(
-                        float(os.environ.get("ARCFACE_THRESHOLD", "0.55")) + 0.08,
-                        0.63
-                    )
-                    hybrid_valid = bool(
-                        strong_arc
-                        and hybrid_score >= 80.0
-                    )
-
-                hybrid_total += 1
-                final_hybrid_id = hybrid_id if hybrid_valid else -1
-                hybrid_correct += int(final_hybrid_id == true_id)
-
-                if hybrid_valid:
-                    hybrid_accepted += 1
-                    hybrid_accepted_correct += int(
-                        hybrid_id == true_id
-                    )
-
-            except Exception as e:
-                skipped += 1
-                print(
-                    f"[train] Hold-out validation skipped {filename}: {e}",
-                    flush=True
+                lb_correct += int(
+                    lb_confidence >= lbph_threshold
+                    and lb_pred == true_id
                 )
 
-        if not arc_total or not lb_total or not hybrid_total:
+            # --------------------------------------------------------------
+            # Hybrid: mirror the production decision.
+            # ArcFace is primary. LBPH is secondary.
+            # --------------------------------------------------------------
+            hybrid_id = -1
+            hybrid_confidence = 0.0
+            agreement = False
+
+            if arc_pass:
+                if (
+                    lb_pred > 0
+                    and lb_confidence >= lbph_threshold
+                    and lb_pred == arc_pred
+                ):
+                    agreement = True
+
+                    hybrid_confidence = (
+                        arc_confidence * 0.75
+                        + lb_confidence * 0.25
+                    )
+
+                    hybrid_id = arc_pred
+
+                else:
+                    strong_arc = (
+                        best_similarity
+                        >= max(
+                            arc_threshold + 0.08,
+                            0.63
+                        )
+                    )
+
+                    hybrid_confidence = (
+                        arc_confidence * 0.85
+                        + lb_confidence * 0.15
+                    )
+
+                    if strong_arc:
+                        hybrid_id = arc_pred
+
+            hybrid_total += 1
+
+            if agreement:
+                hybrid_agreements += 1
+
+            hybrid_matched = (
+                hybrid_id > 0
+                and hybrid_confidence >= hybrid_threshold
+            )
+
+            if hybrid_matched:
+                hybrid_accepted += 1
+
+                if hybrid_id == true_id:
+                    hybrid_accepted_correct += 1
+
+            hybrid_correct += int(
+                hybrid_matched and hybrid_id == true_id
+            )
+
+        # ------------------------------------------------------------------
+        # Final metrics.
+        # ------------------------------------------------------------------
+        if arc_total == 0:
             return {
                 "available": False,
-                "reason": "No valid hold-out predictions were produced."
+                "reason": "No validation images could be evaluated."
             }
-
-        total_files = len(files)
-        training_images = len(train_files)
-        validation_images = len(val_files)
 
         result = {
             "available": True,
             "validation_type": "proper_80_20_holdout",
-            "split_ratio": "80/20",
-            "training_images": training_images,
-            "validation_images": validation_images,
-            "total_images": total_files,
-            "students": len(set(item[1] for item in files)),
-            "lbph_validation_images": lb_total,
+            "split": "80% training / 20% validation",
+            "training_images": len(train_files),
+            "validation_images": len(val_files),
+
+            "arcface_training_references": len(train_indices),
             "arcface_validation_images": arc_total,
-            "hybrid_validation_images": hybrid_total,
-            "skipped_validation_images": skipped,
-            "lbph_accuracy": round(
-                lb_correct / max(1, lb_total) * 100.0,
-                1
-            ),
             "arcface_accuracy": round(
                 arc_correct / max(1, arc_total) * 100.0,
                 1
             ),
+
+            "lbph_training_images": len(lbph_train_images),
+            "lbph_validation_images": lb_total,
+            "lbph_accuracy": round(
+                lb_correct / max(1, lb_total) * 100.0,
+                1
+            ),
+
+            "hybrid_validation_images": hybrid_total,
             "hybrid_accuracy": round(
                 hybrid_correct / max(1, hybrid_total) * 100.0,
                 1
             ),
+
+            "hybrid_threshold": hybrid_threshold,
+            "hybrid_accepted": hybrid_accepted,
             "hybrid_acceptance_rate": round(
                 hybrid_accepted / max(1, hybrid_total) * 100.0,
                 1
             ),
+            "hybrid_accepted_correct": hybrid_accepted_correct,
             "hybrid_accepted_correct_rate": round(
                 hybrid_accepted_correct / max(1, hybrid_accepted) * 100.0,
                 1
-            ) if hybrid_accepted else 0.0,
+            ),
             "hybrid_consensus_rate": round(
-                consensus / max(1, hybrid_total) * 100.0,
+                hybrid_agreements / max(1, hybrid_total) * 100.0,
                 1
             ),
-            "hybrid_threshold": 80.0,
-            "note": (
-                "Accuracy is calculated only on unseen 20% hold-out images. "
-                "Production models are trained on the full dataset afterward."
+            "students": len(
+                set(item[1] for item in files)
             )
         }
+
+        print(
+            "================================================",
+            flush=True
+        )
+        print(
+            "[train] PROPER 80/20 HOLD-OUT VALIDATION",
+            flush=True
+        )
+        print(
+            f"[train] Training images: {len(train_files)}",
+            flush=True
+        )
+        print(
+            f"[train] Validation images: {len(val_files)}",
+            flush=True
+        )
+        print(
+            f"[train] LBPH Accuracy: {result['lbph_accuracy']:.1f}%",
+            flush=True
+        )
+        print(
+            f"[train] ArcFace Accuracy: {result['arcface_accuracy']:.1f}%",
+            flush=True
+        )
+        print(
+            f"[train] Hybrid Accuracy: {result['hybrid_accuracy']:.1f}%",
+            flush=True
+        )
+        print(
+            f"[train] Hybrid Acceptance Rate: {result['hybrid_acceptance_rate']:.1f}%",
+            flush=True
+        )
+        print(
+            "================================================",
+            flush=True
+        )
+
+        del arc_embeddings
+        del arc_labels
+        del db_filenames
+        gc.collect()
 
         return result
 
     except Exception as e:
-        traceback.print_exc()
         return {
             "available": False,
             "reason": str(e)
         }
-
 
 def _arcface_align_from_validation_crop(face_color):
     """
@@ -1115,6 +1220,13 @@ def main():
             }
         )
 
+        # Always initialize validation variables before any optional validation work.
+        lbph_validation = None
+        validation = {
+            "available": False,
+            "reason": "Validation has not run yet."
+        }
+
         # ---------------------------------------------------------
         # LBPH
         # ---------------------------------------------------------
@@ -1148,8 +1260,55 @@ def main():
             }
         )
 
-        # The final accuracy report is calculated after ArcFace embeddings
-        # are ready, using a proper deterministic 80/20 hold-out split.
+        lbph_validation = None
+        try:
+            _, val_files_preview = _validation_split(files)
+            if val_files_preview:
+                # A temporary ArcFace model is not needed yet; calculate LBPH
+                # validation directly with a temporary held-out model.
+                train_val_files, val_only = _validation_split(files)
+                vf, vl = [], []
+                for vpath, vsid, _ in train_val_files:
+                    img = load_gray_face(vpath)
+                    if img is not None:
+                        vf.append(img)
+                        vl.append(vsid)
+                temp_lb = None
+                if vf and len(set(vl)) >= 2:
+                    temp_lb = cv2.face.LBPHFaceRecognizer_create(
+                        radius=1, neighbors=8, grid_x=8, grid_y=8
+                    )
+                    temp_lb.train(vf, np.asarray(vl, dtype=np.int32))
+
+                correct = total = 0
+                for vpath, vsid, _ in val_only:
+                    img = load_gray_face(vpath)
+                    if img is None or temp_lb is None:
+                        continue
+                    pred, _ = temp_lb.predict(img)
+                    total += 1
+                    correct += int(int(pred) == int(vsid))
+
+                if total:
+                    lbph_validation = {
+                        "accuracy": round(correct / total * 100.0, 1),
+                        "validation_images": total
+                    }
+                    lbph_result["validation_accuracy"] = lbph_validation["accuracy"]
+                    update_status(
+                        "running",
+                        f"LBPH validation accuracy: {lbph_validation['accuracy']:.1f}%",
+                        35,
+                        {
+                            "lbph": lbph_result,
+                            "accuracy": {"lbph": lbph_validation}
+                        }
+                    )
+        except Exception as validation_error:
+            print(
+                f"[train] LBPH validation warning: {validation_error}",
+                flush=True
+            )
 
         update_status(
             "running",
@@ -1184,7 +1343,7 @@ def main():
         # running ArcFace inference a second time and is much faster/lighter.
         update_status(
             "running",
-            "ArcFace embeddings completed. Running proper 80/20 hold-out validation...",
+            "ArcFace embeddings completed. Running quick validation (no extra ArcFace inference)...",
             88,
             {
                 "lbph": lbph_result,
@@ -1193,7 +1352,7 @@ def main():
         )
 
         try:
-            validation = evaluate_validation(files, validation_ratio=0.20)
+            validation = evaluate_validation(files, None)
         except Exception as validation_error:
             print(
                 f"[train] Full validation warning: {validation_error}",
