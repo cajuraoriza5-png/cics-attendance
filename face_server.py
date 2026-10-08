@@ -21,6 +21,9 @@ Important:
 
 import os
 
+HYBRID_FUSION_VERSION = "ARCFACE_PRIMARY_LBPH_VERIFY_V4"
+# ArcFace is the final identity authority when LBPH and ArcFace disagree.
+# LBPH remains available for diagnostics and agreement verification.
 HYBRID_FUSION_VERSION = "HYBRID-LBPH-ARCFACE-V3"
 import sys
 import json
@@ -89,7 +92,7 @@ ARCFACE_THRESHOLD = float(
 )
 
 LBPH_THRESHOLD = float(
-    os.environ.get("LBPH_THRESHOLD", "60.0")
+    os.environ.get("LBPH_THRESHOLD", "80.0")
 )
 
 HYBRID_THRESHOLD = float(
@@ -914,21 +917,16 @@ def _lbph_predict(face_roi):
 
 def _hybrid_predict(arc, lbph):
     """
-    Enhanced Hybrid ArcFace + LBPH identification.
+    ArcFace-primary Hybrid decision.
 
-    The Hybrid is a genuine score-fusion result. It does not train a fourth
-    neural network and it does not simply copy the highest individual score.
-
-    When ArcFace and LBPH identify the same student, both signals contribute
-    to the Hybrid score and an agreement bonus rewards their consistency.
-    This is intended to make the Hybrid confidence stronger when both models
-    independently support the same identity.
-
-    When the models disagree, the stronger identity signal is retained and
-    Hybrid uses an enhanced fusion score with a bounded confidence-margin
-    bonus instead of applying a disagreement penalty.
-
-    Confidence values are fusion/display scores, not probabilities.
+    IMPORTANT:
+    - ArcFace is the primary identity model.
+    - LBPH is a secondary verification/support signal.
+    - LBPH can NEVER replace an accepted ArcFace identity.
+    - If LBPH and ArcFace disagree, Hybrid keeps the ArcFace identity.
+    - A different LBPH candidate is reported for diagnostics only.
+    - Confidence is allowed to change from frame to frame; it is not
+      compared with the previous frame.
     """
 
     arc_id = int(arc.get("id", -1)) if arc else -1
@@ -938,192 +936,182 @@ def _hybrid_predict(arc, lbph):
     lbph_confidence = float(lbph.get("confidence", 0.0)) if lbph else 0.0
     arc_similarity = float(arc.get("similarity", 0.0)) if arc else 0.0
 
-    valid_arc = arc_id > 0
-    valid_lbph = lbph_id > 0
+    arc_pass = bool(
+        arc
+        and arc.get("matched")
+        and arc_id > 0
+    )
+
+    lbph_pass = bool(
+        lbph
+        and lbph.get("matched")
+        and lbph_id > 0
+    )
+
+    same_identity = (
+        arc_pass
+        and lbph_pass
+        and arc_id == lbph_id
+    )
+
+    disagreement = (
+        arc_pass
+        and lbph_pass
+        and arc_id != lbph_id
+    )
 
     # ------------------------------------------------------------------
-    # CASE 1: Both algorithms identify the same student.
-    # Enhanced fusion: ArcFace 65% + LBPH 35% + agreement bonus.
+    # CASE 1: ArcFace does not pass.
+    #
+    # Do NOT let a random LBPH candidate become the final Hybrid identity.
+    # This is important because LBPH can produce a plausible-looking
+    # candidate even when it is not actually the correct student.
     # ------------------------------------------------------------------
-    if valid_arc and valid_lbph and arc_id == lbph_id:
-        weighted_score = (
-            arc_confidence * 0.65
-            + lbph_confidence * 0.35
+    if not arc_pass:
+        return {
+            "id": -1,
+            "confidence": round(max(0.0, arc_confidence), 1),
+            "matched": False,
+            "algorithm": "hybrid",
+            "reason": "ArcFace threshold not reached; LBPH cannot override ArcFace",
+            "arcface_confidence": round(arc_confidence, 1),
+            "arcface_similarity": round(arc_similarity, 5),
+            "lbph_confidence": round(lbph_confidence, 1),
+            "lbph_id": lbph_id if lbph_id > 0 else -1,
+            "agreement": False,
+            "consensus": False,
+            "fusion_method": "ArcFace primary; LBPH cannot override"
+        }
+
+    # ------------------------------------------------------------------
+    # CASE 2: ArcFace and LBPH agree.
+    #
+    # Both models support the same enrolled student, so a normal fusion
+    # score is used. The final identity is ArcFace's identity.
+    # ------------------------------------------------------------------
+    if same_identity:
+        hybrid_score = (
+            arc_confidence * 0.75
+            + lbph_confidence * 0.25
         )
 
-        # Agreement bonus is based on the weaker supporting model.
-        # This rewards two independent models agreeing without simply
-        # copying the strongest score.
-        agreement_bonus = min(
-            10.0,
-            min(arc_confidence, lbph_confidence) * 0.10
-        )
-
-        hybrid_score = weighted_score + agreement_bonus
         hybrid_score = min(99.9, max(0.0, hybrid_score))
-
-        strongest = max(arc_confidence, lbph_confidence)
-        gain_vs_strongest = hybrid_score - strongest
 
         return {
             "id": arc_id,
             "confidence": round(hybrid_score, 1),
             "matched": bool(hybrid_score >= HYBRID_THRESHOLD),
             "algorithm": "hybrid",
-            "reason": "LBPH + ArcFace agree on the same student",
+            "reason": "ArcFace + LBPH agree on the same student",
             "arcface_confidence": round(arc_confidence, 1),
             "arcface_similarity": round(arc_similarity, 5),
             "lbph_confidence": round(lbph_confidence, 1),
+            "lbph_id": lbph_id,
             "agreement": True,
             "consensus": True,
-            "agreement_bonus": round(agreement_bonus, 2),
-            "confidence_gain": round(gain_vs_strongest, 1),
-            "confidence_gain_vs_arcface": round(
-                hybrid_score - arc_confidence, 1
-            ),
-            "confidence_gain_vs_lbph": round(
-                hybrid_score - lbph_confidence, 1
-            ),
-            "fusion_method": (
-                "65% ArcFace + 35% LBPH + 10% agreement bonus"
-            )
+            "fusion_method": "75% ArcFace + 25% LBPH agreement"
         }
 
     # ------------------------------------------------------------------
-    # CASE 2: Models disagree.
-    # Hybrid remains independent, but disagreement reduces confidence.
+    # CASE 3: ArcFace passes but LBPH identifies a DIFFERENT student.
+    #
+    # This is the case you are experiencing.
+    #
+    # Example:
+    #   ArcFace -> Student 21, 88%
+    #   LBPH    -> Student 08, 95%
+    #
+    # The old fusion could allow the stronger LBPH candidate to influence
+    # the final identity. That is unsafe.
+    #
+    # New behavior:
+    #   Hybrid -> Student 21
+    #
+    # LBPH remains visible as a diagnostic result, but cannot override
+    # ArcFace's identity.
     # ------------------------------------------------------------------
-    if valid_arc and valid_lbph and arc_id != lbph_id:
-        if arc_confidence >= lbph_confidence:
-            hybrid_id = arc_id
-            primary = arc_confidence
-            secondary = lbph_confidence
-            source = "ArcFace"
-        else:
-            hybrid_id = lbph_id
-            primary = lbph_confidence
-            secondary = arc_confidence
-            source = "LBPH"
-
-        # The models disagree, so do NOT average them and then apply a
-        # penalty. That was causing the Hybrid score to become much lower
-        # than the stronger model.
+    if disagreement:
+        # Use ArcFace confidence as the identity confidence. We apply only
+        # a small reliability adjustment when LBPH disagrees; importantly,
+        # the identity remains ArcFace's ID.
         #
-        # Hybrid keeps the stronger identity as the candidate, then uses the
-        # second model's confidence and the confidence margin as supporting
-        # fusion evidence. A bounded margin bonus rewards a clear stronger
-        # signal while keeping the result below 100.
-        weighted_score = (
-            primary * 0.80
-            + secondary * 0.20
-        )
-
-        disagreement_margin = max(
-            0.0,
-            primary - secondary
-        )
-
-        margin_bonus = min(
-            8.0,
-            disagreement_margin * 0.35
-        )
-
-        hybrid_score = weighted_score + margin_bonus
-
-        # Hybrid should represent an enhanced result, not a reduced copy of
-        # the stronger model. Require a small improvement over the primary
-        # confidence, unless the score is already at the display ceiling.
-        if primary < 99.9:
-            hybrid_score = max(
-                hybrid_score,
-                primary + min(
-                    2.0,
-                    max(0.1, disagreement_margin * 0.05)
-                )
+        # Strong ArcFace similarity is required when the secondary model
+        # disagrees. This reduces false acceptance without allowing LBPH
+        # to select a different student.
+        strong_arc = (
+            arc_similarity
+            >= max(
+                ARCFACE_THRESHOLD + 0.08,
+                0.63
             )
+        )
 
-        hybrid_score = min(99.9, max(0.0, hybrid_score))
-
-        return {
-            "id": hybrid_id,
-            "confidence": round(hybrid_score, 1),
-            "matched": bool(hybrid_score >= HYBRID_THRESHOLD),
-            "algorithm": "hybrid",
-            "reason": (
-                f"Models disagree; {source} candidate selected as primary "
-                "with enhanced fusion"
-            ),
-            "arcface_confidence": round(arc_confidence, 1),
-            "arcface_similarity": round(arc_similarity, 5),
-            "lbph_confidence": round(lbph_confidence, 1),
-            "agreement": False,
-            "consensus": False,
-            "confidence_gain": round(
-                hybrid_score - max(arc_confidence, lbph_confidence), 1
-            ),
-            "disagreement_margin": round(disagreement_margin, 1),
-            "margin_bonus": round(margin_bonus, 2),
-            "fusion_method": (
-                "80% primary + 20% secondary + bounded disagreement-margin bonus"
-            )
-        }
-
-    # ------------------------------------------------------------------
-    # CASE 3: ArcFace only.
-    # ------------------------------------------------------------------
-    if valid_arc:
-        hybrid_score = arc_confidence * 0.90
+        # Do not let the incorrect LBPH confidence increase the final
+        # confidence. The displayed Hybrid score is based on ArcFace only
+        # in a disagreement case.
+        hybrid_score = min(
+            99.9,
+            max(0.0, arc_confidence)
+        )
 
         return {
             "id": arc_id,
-            "confidence": round(
-                min(99.9, max(0.0, hybrid_score)), 1
+            "confidence": round(hybrid_score, 1),
+            "matched": bool(
+                strong_arc
+                and hybrid_score >= HYBRID_THRESHOLD
             ),
-            "matched": bool(hybrid_score >= HYBRID_THRESHOLD),
             "algorithm": "hybrid",
-            "reason": "ArcFace candidate only; LBPH unavailable",
+            "reason": (
+                "ArcFace primary; LBPH identified a different student"
+            ),
             "arcface_confidence": round(arc_confidence, 1),
             "arcface_similarity": round(arc_similarity, 5),
             "lbph_confidence": round(lbph_confidence, 1),
+            "lbph_id": lbph_id,
             "agreement": False,
             "consensus": False,
-            "fusion_method": "ArcFace only with 10% reliability reduction"
+            "lbph_disagreement": True,
+            "fusion_method": "ArcFace primary; LBPH disagreement cannot override"
         }
 
     # ------------------------------------------------------------------
-    # CASE 4: LBPH only.
+    # CASE 4: ArcFace passes but LBPH has no valid candidate / does not pass.
+    #
+    # ArcFace remains the final identity. A weak or missing LBPH result
+    # does not cause a different student to be selected.
     # ------------------------------------------------------------------
-    if valid_lbph:
-        hybrid_score = lbph_confidence * 0.90
+    strong_arc = (
+        arc_similarity
+        >= max(
+            ARCFACE_THRESHOLD + 0.08,
+            0.63
+        )
+    )
 
-        return {
-            "id": lbph_id,
-            "confidence": round(
-                min(99.9, max(0.0, hybrid_score)), 1
-            ),
-            "matched": bool(hybrid_score >= HYBRID_THRESHOLD),
-            "algorithm": "hybrid",
-            "reason": "LBPH candidate only; ArcFace unavailable",
-            "arcface_confidence": round(arc_confidence, 1),
-            "arcface_similarity": round(arc_similarity, 5),
-            "lbph_confidence": round(lbph_confidence, 1),
-            "agreement": False,
-            "consensus": False,
-            "fusion_method": "LBPH only with 10% reliability reduction"
-        }
+    hybrid_score = min(
+        99.9,
+        max(0.0, arc_confidence)
+    )
 
     return {
-        "id": -1,
-        "confidence": 0.0,
-        "matched": False,
+        "id": arc_id,
+        "confidence": round(hybrid_score, 1),
+        "matched": bool(
+            strong_arc
+            and hybrid_score >= HYBRID_THRESHOLD
+        ),
         "algorithm": "hybrid",
-        "reason": "Neither LBPH nor ArcFace produced a valid candidate",
+        "reason": (
+            "ArcFace primary; LBPH did not verify"
+        ),
         "arcface_confidence": round(arc_confidence, 1),
         "arcface_similarity": round(arc_similarity, 5),
         "lbph_confidence": round(lbph_confidence, 1),
+        "lbph_id": lbph_id if lbph_id > 0 else -1,
         "agreement": False,
         "consensus": False,
-        "fusion_method": "No valid candidate"
+        "fusion_method": "ArcFace primary; LBPH secondary verification"
     }
 
 def _recognize_face(face_color, face_roi):
@@ -1145,25 +1133,10 @@ def _recognize_face(face_color, face_roi):
 def status():
     with _lock:
         models = dict(_models_ready)
-        detector_ready = (
-            _cascade is not None
-            and not _cascade.empty()
-        )
-
-    # If all runtime components are already available, do not expose a
-    # stale startup flag left behind by a background loader/Gunicorn worker.
-    if (
-        detector_ready
-        and models.get("lbph", False)
-        and models.get("arcface", False)
-        and models.get("hybrid", False)
-    ):
-        models["loading"] = False
-
-    models["face_detector"] = detector_ready
 
     return jsonify({
         "ok": True,
+        "hybrid_fusion_version": HYBRID_FUSION_VERSION,
         "models": models,
         "arcface_network_loaded": bool(_arc_app is not None),
         "algorithms": [
@@ -1368,33 +1341,10 @@ def recognize():
             "error": "Empty frame"
         }), 400
 
-    # Gunicorn can create a fresh worker while the background startup
-    # loader is still running. Re-initialize the lightweight Haar detector
-    # on demand instead of returning a 503 to the attendance scanner.
-    global _cascade
-    if (
-        _cascade is None
-        or _cascade.empty()
-    ):
-        try:
-            detector = cv2.CascadeClassifier(
-                cv2.data.haarcascades
-                + "haarcascade_frontalface_default.xml"
-            )
-            if detector.empty():
-                return jsonify({
-                    "error": "Face detector could not be initialized."
-                }), 503
-            _cascade = detector
-            print(
-                "[face_server] Haar Cascade re-initialized on /recognize [OK]",
-                flush=True
-            )
-        except Exception as detector_error:
-            return jsonify({
-                "error": "Face detector is not ready",
-                "details": str(detector_error)
-            }), 503
+    if _cascade is None:
+        return jsonify({
+            "error": "Face detector is not ready"
+        }), 503
 
     # Detect face
     gray = cv2.cvtColor(
