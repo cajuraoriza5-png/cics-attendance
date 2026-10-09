@@ -1447,7 +1447,18 @@ def recognize():
             "error": "Face detector is not ready"
         }), 503
 
-    # Detect face
+    # Prepare the exact grayscale/equalized image used by LBPH.
+    # The safe detector also performs its own preprocessing, but we keep
+    # gray_eq here because the detected face ROI below uses it.
+    gray = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2GRAY
+    )
+
+    gray_eq = cv2.equalizeHist(
+        gray
+    )
+
     # Detect face safely. OpenCV detector errors must never become HTTP 500.
     detections = _safe_detect_faces(frame)
 
