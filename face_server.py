@@ -60,11 +60,13 @@ INCOMING_DIR = os.path.join(PROJECT, "faces_incoming")
 
 TRAINER = os.path.join(PROJECT, "trainer.yml")
 ARC_DB = os.path.join(PROJECT, "arcface_embeddings.npz")
+LBPH_VERIFIER_DIR = os.path.join(PROJECT, "lbph_student_verifiers")
 
 STATUS_F = os.path.join(FACES_DIR, ".train_status.json")
 
 os.makedirs(FACES_DIR, exist_ok=True)
 os.makedirs(INCOMING_DIR, exist_ok=True)
+os.makedirs(LBPH_VERIFIER_DIR, exist_ok=True)
 
 
 # =============================================================================
