@@ -21,7 +21,7 @@ Important:
 
 import os
 
-HYBRID_FUSION_VERSION = "FAST-CACHED-TRAINER-COMPATIBLE-V6"
+HYBRID_FUSION_VERSION = "PERSISTED-SAME-STUDENT-FUSION-V7"
 import sys
 import json
 import base64
@@ -59,7 +59,7 @@ FACES_DIR = os.path.join(PROJECT, "faces")
 INCOMING_DIR = os.path.join(PROJECT, "faces_incoming")
 
 TRAINER = os.path.join(PROJECT, "trainer.yml")
-ARC_DB = os.path.join(PROJECT, "arcface_embeddings.npz")  # Fast trainer stores embeddings/labels plus optional cache metadata.
+ARC_DB = os.path.join(PROJECT, "arcface_embeddings.npz")
 
 STATUS_F = os.path.join(FACES_DIR, ".train_status.json")
 
@@ -812,17 +812,7 @@ def _load_same_student_lbph_training_face(path):
             )
 
         if len(detections) == 0:
-            # Some enrollment files are already tight face crops and Haar may
-            # not detect a second face inside them. Fall back to the same
-            # grayscale/resizing helper instead of dropping every sample.
-            fallback = _load_gray_face(path)
-            if fallback is None or fallback.size == 0:
-                return None
-            return cv2.resize(
-                cv2.equalizeHist(fallback),
-                (100, 100),
-                interpolation=cv2.INTER_AREA
-            )
+            return None
 
         x, y, w, h = max(detections, key=lambda r: r[2] * r[3])
         face = image[y:y+h, x:x+w]
@@ -836,44 +826,82 @@ def _load_same_student_lbph_training_face(path):
         return None
 
 
-def _build_same_student_lbph_models():
-    """Build one LBPH verifier per student.
+def _build_same_student_lbph_models(force_rebuild=False):
+    """Build/save per-student LBPH verifiers, or load saved verifiers.
 
-    These models are NOT used to choose a different identity. They answer one
-    question only: 'How well does this face match this specific student?'
-    That gives the Hybrid a fair LBPH score for the same student selected by
-    ArcFace, even when the normal multi-class LBPH top-1 prediction disagrees.
+    force_rebuild=True is used after a training run so new enrollment images
+    are used. At ordinary startup, saved verifier files can be loaded even if
+    the original face images are not present in the current container.
     """
     global _lbph_student_models
 
     if not _opencv_face_available():
+        print("[face_server] OpenCV LBPH is unavailable.", flush=True)
         return False
 
+    os.makedirs(LBPH_VERIFIER_DIR, exist_ok=True)
     files = _iter_face_files(FACES_DIR)
     groups = {}
     for path, sid, _ in files:
         groups.setdefault(int(sid), []).append(path)
 
+    saved_files = [
+        name for name in os.listdir(LBPH_VERIFIER_DIR)
+        if name.lower().endswith((".yml", ".yaml", ".xml"))
+        and os.path.splitext(name)[0].isdigit()
+    ]
+
+    # During retraining, discard the old verifier files and regenerate them.
+    if force_rebuild:
+        for filename in saved_files:
+            try:
+                os.remove(os.path.join(LBPH_VERIFIER_DIR, filename))
+            except OSError as e:
+                print(f"[face_server] Could not remove old verifier {filename}: {e}", flush=True)
+        saved_files = []
+
     new_models = {}
-    for sid, paths in groups.items():
-        images = []
-        labels = []
-        for path in paths:
-            img = _load_same_student_lbph_training_face(path)
-            if img is None:
+
+    # Build only when requested, or when no persisted verifier exists yet.
+    if groups and (force_rebuild or not saved_files):
+        for sid, paths in sorted(groups.items()):
+            images = []
+            for path in paths:
+                img = _load_same_student_lbph_training_face(path)
+                if img is not None and img.size:
+                    images.append(img)
+
+            if not images:
+                print(f"[face_server] No usable verifier images for student {sid}.", flush=True)
                 continue
-            images.append(img)
-            labels.append(int(sid))
 
-        if not images:
-            continue
+            try:
+                model = _make_lbph_recognizer()
+                labels = np.full(len(images), int(sid), dtype=np.int32)
+                model.train(images, labels)
+                model_path = os.path.join(LBPH_VERIFIER_DIR, f"{sid}.yml")
+                model.write(model_path)
+                new_models[int(sid)] = model
+                print(f"[face_server] Saved LBPH verifier for student {sid} ({len(images)} images).", flush=True)
+            except Exception as e:
+                print(f"[face_server] Same-student LBPH model failed for {sid}: {e}", flush=True)
 
-        try:
-            model = _make_lbph_recognizer()
-            model.train(images, np.asarray(labels, dtype=np.int32))
-            new_models[int(sid)] = model
-        except Exception as e:
-            print(f"[face_server] Same-student LBPH model failed for {sid}: {e}", flush=True)
+    # Load persisted files when we did not just build a fresh set.
+    if not new_models:
+        for filename in sorted(os.listdir(LBPH_VERIFIER_DIR)):
+            if not filename.lower().endswith((".yml", ".yaml", ".xml")):
+                continue
+            stem = os.path.splitext(filename)[0]
+            if not stem.isdigit():
+                continue
+            sid = int(stem)
+            model_path = os.path.join(LBPH_VERIFIER_DIR, filename)
+            try:
+                model = _make_lbph_recognizer()
+                model.read(model_path)
+                new_models[sid] = model
+            except Exception as e:
+                print(f"[face_server] Could not load LBPH verifier {filename}: {e}", flush=True)
 
     with _lbph_student_lock:
         _lbph_student_models = new_models
@@ -1146,30 +1174,18 @@ def _hybrid_predict(arc, lbph, same_student_lbph=None):
 
 
 def _recognize_face(face_color, face_roi):
-    """Return three scores against one common candidate identity.
-
-    ArcFace selects the comparison candidate. The independent LBPH top-1
-    result is preserved under top1_* diagnostic fields, while the main LBPH
-    id/confidence fields are changed to the LBPH one-vs-student score for
-    that same candidate. This lets the existing scanner compare all three
-    algorithms without accidentally displaying three different identities.
-    """
     arc = _arcface_predict(face_color)
-    lbph_top1 = _lbph_predict(face_roi)
+    lbph = _lbph_predict(face_roi)
 
-    candidate_id = int(arc.get("id", -1)) if arc else -1
     same_student = None
-    if candidate_id > 0:
-        same_student = _lbph_score_for_student(face_roi, candidate_id)
+    if arc.get("id", -1) > 0:
+        same_student = _lbph_score_for_student(face_roi, arc["id"])
 
-    hybrid = _hybrid_predict(arc, lbph_top1, same_student)
+    hybrid = _hybrid_predict(arc, lbph, same_student)
 
-    # Preserve LBPH's independent prediction for diagnostics and research.
-    lbph = dict(lbph_top1)
-    lbph["top1_id"] = int(lbph_top1.get("id", -1))
-    lbph["top1_confidence"] = float(lbph_top1.get("confidence", 0.0))
-    lbph["top1_distance"] = float(lbph_top1.get("distance", 999.0))
-    lbph["comparison_id"] = candidate_id
+    # Expose a same-student LBPH value without pretending that LBPH's
+    # independent top-1 prediction was the same person.
+    lbph["comparison_id"] = int(arc.get("id", -1))
     lbph["comparison_confidence"] = round(
         float(same_student.get("confidence", 0.0)) if same_student else 0.0,
         1
@@ -1177,35 +1193,11 @@ def _recognize_face(face_color, face_roi):
     lbph["comparison_distance"] = (
         same_student.get("distance", 999.0) if same_student else 999.0
     )
-    verifier_available = bool(same_student and same_student.get("available", False))
-    lbph["comparison_is_same_student"] = bool(candidate_id > 0 and verifier_available)
-    lbph["identity_type"] = "same_student_comparison"
-
-    # Main displayed identity is common across all three algorithms.
-    # Never claim a comparison score if the per-student verifier is missing.
-    if candidate_id > 0 and verifier_available:
-        lbph["id"] = candidate_id
-        lbph["confidence"] = round(float(same_student.get("confidence", 0.0)), 1)
-        lbph["distance"] = float(same_student.get("distance", 999.0))
-        lbph["matched"] = bool(lbph["confidence"] >= LBPH_THRESHOLD)
-        lbph["comparison_note"] = "LBPH score for the common ArcFace candidate; independent LBPH top-1 is in top1_id/top1_confidence."
-    else:
-        # Do not silently label the top-1 LBPH score as a score for ArcFace's ID.
-        lbph["id"] = candidate_id if candidate_id > 0 else int(lbph_top1.get("id", -1))
-        lbph["confidence"] = 0.0 if candidate_id > 0 else float(lbph_top1.get("confidence", 0.0))
-        lbph["matched"] = False if candidate_id > 0 else bool(lbph_top1.get("matched", False))
-        lbph["comparison_note"] = "Same-student LBPH verifier unavailable; score is 0 until verifier models load."
-        lbph["verifier_available"] = False
-
-    # Explicit common identity metadata for frontends and thesis logging.
-    for item in (arc, lbph, hybrid):
-        item["comparison_id"] = candidate_id
-        item["comparison_student_id"] = candidate_id
-    arc["identity_type"] = "common_candidate_arcface"
-    hybrid["identity_type"] = "same_student_fusion"
-    hybrid["lbph_top1_id"] = int(lbph_top1.get("id", -1))
-    hybrid["lbph_top1_confidence"] = float(lbph_top1.get("confidence", 0.0))
-    hybrid["lbph_verifier_available"] = verifier_available
+    lbph["comparison_is_same_student"] = bool(
+        arc.get("id", -1) > 0
+        and same_student
+        and same_student.get("available", False)
+    )
 
     return arc, lbph, hybrid
 
@@ -1224,7 +1216,6 @@ def status():
         "hybrid_fusion_version": HYBRID_FUSION_VERSION,
         "models": models,
         "arcface_network_loaded": bool(_arc_app is not None),
-        "same_student_lbph_verifiers": len(_lbph_student_models),
         "algorithms": [
             "LBPH",
             "ArcFace",
@@ -1579,12 +1570,6 @@ def recognize():
         x1:x2
     ]
 
-    # Recreate gray_eq immediately before use. This guards against the
-    # NameError seen in Render logs and ensures the LBPH crop is equalized.
-    gray_eq = cv2.equalizeHist(
-        cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    )
-
     face_roi = cv2.resize(
         gray_eq[
             y:y+h,
@@ -1924,7 +1909,6 @@ def _run_training_script():
     process = subprocess.run(
         [
             sys.executable,
-            "-u",
             train_script
         ],
         cwd=PROJECT,
@@ -1976,12 +1960,10 @@ def _reload_after_training():
             "ArcFace embedding database was not created."
         )
 
-    verifier_ok = _build_same_student_lbph_models()
-    if not verifier_ok:
-        print("[face_server] WARNING: no same-student LBPH verifiers loaded; Hybrid comparison must not be used until this is fixed.", flush=True)
+    _build_same_student_lbph_models()
 
     with _lock:
-        _models_ready["hybrid"] = bool(_models_ready["lbph"] and _models_ready["arcface"] and verifier_ok)
+        _models_ready["hybrid"] = True
 
 
 def _do_train():
@@ -2261,14 +2243,13 @@ def reload_models():
         loaded["same_student_lbph_error"] = str(e)
 
     with _lock:
-        _models_ready["hybrid"] = (
+        _models_ready["hybrid"] = bool(
             _models_ready["lbph"]
             and _models_ready["arcface"]
+            and len(_lbph_student_models) > 0
         )
 
-    loaded["hybrid"] = (
-        _models_ready["hybrid"]
-    )
+    loaded["hybrid"] = _models_ready["hybrid"]
 
     return jsonify({
         "ok": True,
@@ -2387,9 +2368,10 @@ def _load_render_lightweight_models():
         print(f"[face_server] Same-student LBPH startup build failed: {e}", flush=True)
 
     with _lock:
-        _models_ready["hybrid"] = (
+        _models_ready["hybrid"] = bool(
             _models_ready["lbph"]
             and _models_ready["arcface"]
+            and len(_lbph_student_models) > 0
         )
         _models_ready["loading"] = False
 
