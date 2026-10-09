@@ -18,7 +18,11 @@ HYBRID_THRESHOLD=float(os.getenv('HYBRID_THRESHOLD','80'))
 MIN_SAMPLES=int(os.getenv('MIN_SAMPLES_PER_STUDENT','3')); MIN_BYTES=int(os.getenv('MIN_FILE_BYTES','1024'))
 lock=threading.RLock(); cascade_lock=threading.RLock(); train_thread=None
 cascade=None; yolo_model=None; arc_model=None; arc_embeddings=None; arc_labels=None
-ready={'yolo':False,'arcface':False,'hybrid':False,'loading':True}
+ready={'yolo':False,'arcface':False,'hybrid':False,'lbph':False,'loading':True}
+
+def _sync_legacy_status():
+    # Legacy PHP scanner expects models.lbph; this aliases it to YOLO during migration.
+    ready['lbph'] = ready['yolo']
 
 
 def _load_cascade():
@@ -79,12 +83,12 @@ def _load_arc_db():
 def _load_yolo():
     global yolo_model
     if not YOLO_WEIGHTS.exists():
-        with lock:yolo_model=None;ready['yolo']=False
+        with lock:yolo_model=None;ready['yolo']=False;_sync_legacy_status()
         return False
     from ultralytics import YOLO
     model=YOLO(str(YOLO_WEIGHTS),task='classify')
     names=model.names
-    with lock:yolo_model=model;ready['yolo']=True
+    with lock:yolo_model=model;ready['yolo']=True;_sync_legacy_status()
     print(f'[face_server] YOLO classifier loaded with {len(names)} classes',flush=True)
     return True
 
@@ -167,7 +171,7 @@ def _models_load():
     except Exception as e:print('[face_server] YOLO load failed:',e,flush=True)
     try:_load_arc_db()
     except Exception as e:print('[face_server] ArcFace DB load failed:',e,flush=True)
-    with lock:ready['hybrid']=bool(ready['yolo'] and ready['arcface']);ready['loading']=False
+    with lock:ready['hybrid']=bool(ready['yolo'] and ready['arcface']);_sync_legacy_status();_sync_legacy_status();ready['loading']=False
 
 def _decode_image():
     data=request.get_json(force=True,silent=True) or {}; raw=data.get('image','')
@@ -181,7 +185,7 @@ def _decode_image():
 def home():return 'CICS YOLOv8n + ArcFace Hybrid API is Running!'
 @app.get('/status')
 def status():
-    with lock:models=dict(ready)
+    with lock:_sync_legacy_status();models=dict(ready)
     return jsonify({'ok':True,'hybrid_fusion_version':'YOLOV8N_ARCFACE_HYBRID_V1','models':models,'algorithms':['YOLOv8n Student Classification','ArcFace','Hybrid YOLOv8n + ArcFace'],'thresholds':{'yolo_class_probability':YOLO_THRESHOLD,'arcface_similarity':ARCFACE_THRESHOLD,'hybrid_confidence':HYBRID_THRESHOLD}})
 @app.post('/detect')
 def detect():
@@ -236,7 +240,7 @@ def _train_worker():
         proc=subprocess.run([sys.executable,str(script)],cwd=str(ROOT),env=os.environ.copy(),text=True)
         if proc.returncode:raise RuntimeError('train_all_models.py exited with code '+str(proc.returncode))
         _load_yolo();_load_arc_db()
-        with lock:ready['hybrid']=bool(ready['yolo'] and ready['arcface'])
+        with lock:ready['hybrid']=bool(ready['yolo'] and ready['arcface']);_sync_legacy_status()
         if not ready['hybrid']:raise RuntimeError('One or more trained models could not be loaded')
     except Exception as e:
         traceback.print_exc();STATUS_F.write_text(json.dumps({'state':'error','message':'Training failed: '+str(e),'progress':0,'result':{'error':str(e)}}),encoding='utf-8')
@@ -258,7 +262,7 @@ def reload_models():
     except Exception as e:y=False;errors['yolo_error']=str(e)
     try:a=_load_arc_db()
     except Exception as e:a=False;errors['arcface_error']=str(e)
-    with lock:ready['hybrid']=bool(y and a)
+    with lock:ready['hybrid']=bool(y and a);_sync_legacy_status()
     return jsonify({'ok':True,'loaded':{'yolo':y,'arcface':a,'hybrid':ready['hybrid']},'models':ready,'errors':errors})
 
 # Load light models in background so Gunicorn becomes reachable promptly.
