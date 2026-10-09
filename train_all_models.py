@@ -556,7 +556,7 @@ def load_arcface_cache():
     except Exception as e: print(f'[train] Cache ignored: {e}',flush=True); return {},{},{}
 
 def train_arcface(files, model):
-    cached, cached_labels, cached_sigs=load_arcface_cache(); embeddings=[]; labels=[]; names=[]; sigs=[]; failed=[]; reused=0; generated=0; total=len(files); batch_size=int(os.environ.get('ARCFACE_BATCH_SIZE','16'))
+    cached, cached_labels, cached_sigs=load_arcface_cache(); embeddings=[]; labels=[]; names=[]; sigs=[]; failed=[]; reused=0; generated=0; total=len(files); batch_size=1  # Single-image inference avoids ONNX batch-shape warnings on Render
     cascade=cv2.CascadeClassifier(cv2.data.haarcascades+'haarcascade_frontalface_default.xml'); bf=[]; bl=[]; bn=[]; bs=[]
     def flush():
         nonlocal generated
