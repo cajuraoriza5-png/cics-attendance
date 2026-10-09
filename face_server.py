@@ -1146,18 +1146,30 @@ def _hybrid_predict(arc, lbph, same_student_lbph=None):
 
 
 def _recognize_face(face_color, face_roi):
+    """Return three scores against one common candidate identity.
+
+    ArcFace selects the comparison candidate. The independent LBPH top-1
+    result is preserved under top1_* diagnostic fields, while the main LBPH
+    id/confidence fields are changed to the LBPH one-vs-student score for
+    that same candidate. This lets the existing scanner compare all three
+    algorithms without accidentally displaying three different identities.
+    """
     arc = _arcface_predict(face_color)
-    lbph = _lbph_predict(face_roi)
+    lbph_top1 = _lbph_predict(face_roi)
 
+    candidate_id = int(arc.get("id", -1)) if arc else -1
     same_student = None
-    if arc.get("id", -1) > 0:
-        same_student = _lbph_score_for_student(face_roi, arc["id"])
+    if candidate_id > 0:
+        same_student = _lbph_score_for_student(face_roi, candidate_id)
 
-    hybrid = _hybrid_predict(arc, lbph, same_student)
+    hybrid = _hybrid_predict(arc, lbph_top1, same_student)
 
-    # Expose a same-student LBPH value without pretending that LBPH's
-    # independent top-1 prediction was the same person.
-    lbph["comparison_id"] = int(arc.get("id", -1))
+    # Preserve LBPH's independent prediction for diagnostics and research.
+    lbph = dict(lbph_top1)
+    lbph["top1_id"] = int(lbph_top1.get("id", -1))
+    lbph["top1_confidence"] = float(lbph_top1.get("confidence", 0.0))
+    lbph["top1_distance"] = float(lbph_top1.get("distance", 999.0))
+    lbph["comparison_id"] = candidate_id
     lbph["comparison_confidence"] = round(
         float(same_student.get("confidence", 0.0)) if same_student else 0.0,
         1
@@ -1165,11 +1177,35 @@ def _recognize_face(face_color, face_roi):
     lbph["comparison_distance"] = (
         same_student.get("distance", 999.0) if same_student else 999.0
     )
-    lbph["comparison_is_same_student"] = bool(
-        arc.get("id", -1) > 0
-        and same_student
-        and same_student.get("available", False)
-    )
+    verifier_available = bool(same_student and same_student.get("available", False))
+    lbph["comparison_is_same_student"] = bool(candidate_id > 0 and verifier_available)
+    lbph["identity_type"] = "same_student_comparison"
+
+    # Main displayed identity is common across all three algorithms.
+    # Never claim a comparison score if the per-student verifier is missing.
+    if candidate_id > 0 and verifier_available:
+        lbph["id"] = candidate_id
+        lbph["confidence"] = round(float(same_student.get("confidence", 0.0)), 1)
+        lbph["distance"] = float(same_student.get("distance", 999.0))
+        lbph["matched"] = bool(lbph["confidence"] >= LBPH_THRESHOLD)
+        lbph["comparison_note"] = "LBPH score for the common ArcFace candidate; independent LBPH top-1 is in top1_id/top1_confidence."
+    else:
+        # Do not silently label the top-1 LBPH score as a score for ArcFace's ID.
+        lbph["id"] = candidate_id if candidate_id > 0 else int(lbph_top1.get("id", -1))
+        lbph["confidence"] = 0.0 if candidate_id > 0 else float(lbph_top1.get("confidence", 0.0))
+        lbph["matched"] = False if candidate_id > 0 else bool(lbph_top1.get("matched", False))
+        lbph["comparison_note"] = "Same-student LBPH verifier unavailable; score is 0 until verifier models load."
+        lbph["verifier_available"] = False
+
+    # Explicit common identity metadata for frontends and thesis logging.
+    for item in (arc, lbph, hybrid):
+        item["comparison_id"] = candidate_id
+        item["comparison_student_id"] = candidate_id
+    arc["identity_type"] = "common_candidate_arcface"
+    hybrid["identity_type"] = "same_student_fusion"
+    hybrid["lbph_top1_id"] = int(lbph_top1.get("id", -1))
+    hybrid["lbph_top1_confidence"] = float(lbph_top1.get("confidence", 0.0))
+    hybrid["lbph_verifier_available"] = verifier_available
 
     return arc, lbph, hybrid
 
@@ -1188,6 +1224,7 @@ def status():
         "hybrid_fusion_version": HYBRID_FUSION_VERSION,
         "models": models,
         "arcface_network_loaded": bool(_arc_app is not None),
+        "same_student_lbph_verifiers": len(_lbph_student_models),
         "algorithms": [
             "LBPH",
             "ArcFace",
@@ -1939,10 +1976,12 @@ def _reload_after_training():
             "ArcFace embedding database was not created."
         )
 
-    _build_same_student_lbph_models()
+    verifier_ok = _build_same_student_lbph_models()
+    if not verifier_ok:
+        print("[face_server] WARNING: no same-student LBPH verifiers loaded; Hybrid comparison must not be used until this is fixed.", flush=True)
 
     with _lock:
-        _models_ready["hybrid"] = True
+        _models_ready["hybrid"] = bool(_models_ready["lbph"] and _models_ready["arcface"] and verifier_ok)
 
 
 def _do_train():
