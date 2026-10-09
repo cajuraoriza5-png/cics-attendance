@@ -209,6 +209,13 @@ def recognize():
     return jsonify({'faces_count':len(dets),'bbox':{'x':x,'y':y,'w':w,'h':h},'yolo':yolo,'arcface':arc,'hybrid':hybrid,'lbph':yolo,'final_algorithm':'hybrid','final_id':hybrid.get('id',-1)})
 @app.post('/sync_faces')
 def sync_faces():
+    # Require an authenticated server-to-server sync token.
+    expected_token = os.getenv('SYNC_SECRET', '').strip()
+    supplied_token = request.headers.get('X-Sync-Token', '')
+    if not expected_token:
+        return jsonify({'success': False, 'error': 'SYNC_SECRET is not configured on the server'}), 503
+    if not supplied_token or not __import__('hmac').compare_digest(supplied_token, expected_token):
+        return jsonify({'success': False, 'error': 'Unauthorized'}), 401
     try:
         replace=str(request.form.get('replace','0')).lower() in ('1','true','yes')
         staged=any(p.is_file() for p in INCOMING.iterdir()); use_staging=replace or staged; target=INCOMING if use_staging else FACES
