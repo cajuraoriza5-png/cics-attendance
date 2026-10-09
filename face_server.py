@@ -25,6 +25,19 @@ def _sync_legacy_status():
     ready['lbph'] = ready['yolo']
 
 
+def _valid_sync_token():
+    """Validate server-to-server requests using Render's SYNC_SECRET."""
+    import hmac
+
+    expected = os.getenv('SYNC_SECRET', '').strip()
+    supplied = request.headers.get('X-Sync-Token', '')
+    if not expected:
+        return False, 'SYNC_SECRET is not configured on the server'
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        return False, 'Unauthorized'
+    return True, ''
+
+
 def _load_cascade():
     global cascade
     with cascade_lock:
@@ -254,16 +267,29 @@ def _train_worker():
     else:STATUS_F.write_text(json.dumps({'state':'done','message':'YOLOv8n, ArcFace and Hybrid training completed.','progress':100,'result':{'yolo':True,'arcface':True,'hybrid':True}}),encoding='utf-8')
 @app.post('/train')
 def train():
+    # Retraining changes model files and must only be triggered by trusted PHP.
+    authorized, reason = _valid_sync_token()
+    if not authorized:
+        status = 503 if reason.startswith('SYNC_SECRET') else 401
+        return jsonify({'success': False, 'message': reason}), status
+
     global train_thread
-    if train_thread and train_thread.is_alive():return jsonify({'success':False,'message':'Training already in progress'}),409
+    if train_thread and train_thread.is_alive():
+        return jsonify({'success': False, 'message': 'Training already in progress'}), 409
     train_thread=threading.Thread(target=_train_worker,daemon=True);train_thread.start()
-    return jsonify({'success':True,'message':'YOLOv8n + ArcFace + Hybrid training started'})
+    return jsonify({'success':True,'message':'YOLOv8n + ArcFace + Hybrid training started'}), 202
 @app.get('/train/status')
 def train_status():
     try:return jsonify(json.loads(STATUS_F.read_text(encoding='utf-8')))
     except Exception:return jsonify({'state':'unknown','message':'Training has not started yet.','progress':0})
-@app.route('/reload',methods=['GET','POST'])
+@app.route('/reload',methods=['POST'])
 def reload_models():
+    # Only trusted server-side code may reload model artifacts.
+    authorized, reason = _valid_sync_token()
+    if not authorized:
+        status = 503 if reason.startswith('SYNC_SECRET') else 401
+        return jsonify({'ok': False, 'error': reason}), status
+
     errors={}
     try:y=_load_yolo()
     except Exception as e:y=False;errors['yolo_error']=str(e)
