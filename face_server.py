@@ -21,7 +21,7 @@ Important:
 
 import os
 
-HYBRID_FUSION_VERSION = "SAME-STUDENT-SCORE-FUSION-V5"
+HYBRID_FUSION_VERSION = "FAST-CACHED-TRAINER-COMPATIBLE-V6"
 import sys
 import json
 import base64
@@ -59,7 +59,7 @@ FACES_DIR = os.path.join(PROJECT, "faces")
 INCOMING_DIR = os.path.join(PROJECT, "faces_incoming")
 
 TRAINER = os.path.join(PROJECT, "trainer.yml")
-ARC_DB = os.path.join(PROJECT, "arcface_embeddings.npz")
+ARC_DB = os.path.join(PROJECT, "arcface_embeddings.npz")  # Fast trainer stores embeddings/labels plus optional cache metadata.
 
 STATUS_F = os.path.join(FACES_DIR, ".train_status.json")
 
@@ -812,7 +812,17 @@ def _load_same_student_lbph_training_face(path):
             )
 
         if len(detections) == 0:
-            return None
+            # Some enrollment files are already tight face crops and Haar may
+            # not detect a second face inside them. Fall back to the same
+            # grayscale/resizing helper instead of dropping every sample.
+            fallback = _load_gray_face(path)
+            if fallback is None or fallback.size == 0:
+                return None
+            return cv2.resize(
+                cv2.equalizeHist(fallback),
+                (100, 100),
+                interpolation=cv2.INTER_AREA
+            )
 
         x, y, w, h = max(detections, key=lambda r: r[2] * r[3])
         face = image[y:y+h, x:x+w]
@@ -1532,6 +1542,12 @@ def recognize():
         x1:x2
     ]
 
+    # Recreate gray_eq immediately before use. This guards against the
+    # NameError seen in Render logs and ensures the LBPH crop is equalized.
+    gray_eq = cv2.equalizeHist(
+        cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    )
+
     face_roi = cv2.resize(
         gray_eq[
             y:y+h,
@@ -1871,6 +1887,7 @@ def _run_training_script():
     process = subprocess.run(
         [
             sys.executable,
+            "-u",
             train_script
         ],
         cwd=PROJECT,
