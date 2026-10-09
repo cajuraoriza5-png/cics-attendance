@@ -21,7 +21,7 @@ Important:
 
 import os
 
-HYBRID_FUSION_VERSION = "PERSISTED-SAME-STUDENT-FUSION-V7"
+HYBRID_FUSION_VERSION = "PERSISTED-SAME-STUDENT-FUSION-V8"
 import sys
 import json
 import base64
@@ -60,11 +60,13 @@ INCOMING_DIR = os.path.join(PROJECT, "faces_incoming")
 
 TRAINER = os.path.join(PROJECT, "trainer.yml")
 ARC_DB = os.path.join(PROJECT, "arcface_embeddings.npz")
+LBPH_VERIFIER_DIR = os.path.join(PROJECT, "lbph_student_verifiers")
 
 STATUS_F = os.path.join(FACES_DIR, ".train_status.json")
 
 os.makedirs(FACES_DIR, exist_ok=True)
 os.makedirs(INCOMING_DIR, exist_ok=True)
+os.makedirs(LBPH_VERIFIER_DIR, exist_ok=True)
 
 
 # =============================================================================
@@ -827,11 +829,10 @@ def _load_same_student_lbph_training_face(path):
 
 
 def _build_same_student_lbph_models(force_rebuild=False):
-    """Build/save per-student LBPH verifiers, or load saved verifiers.
+    """Build or load one persisted LBPH verifier per student.
 
-    force_rebuild=True is used after a training run so new enrollment images
-    are used. At ordinary startup, saved verifier files can be loaded even if
-    the original face images are not present in the current container.
+    Verifier models are stored separately from trainer.yml. They score the
+    ArcFace-selected student without changing the candidate identity.
     """
     global _lbph_student_models
 
@@ -840,76 +841,70 @@ def _build_same_student_lbph_models(force_rebuild=False):
         return False
 
     os.makedirs(LBPH_VERIFIER_DIR, exist_ok=True)
-    files = _iter_face_files(FACES_DIR)
-    groups = {}
-    for path, sid, _ in files:
-        groups.setdefault(int(sid), []).append(path)
-
-    saved_files = [
-        name for name in os.listdir(LBPH_VERIFIER_DIR)
-        if name.lower().endswith((".yml", ".yaml", ".xml"))
-        and os.path.splitext(name)[0].isdigit()
+    saved = [
+        n for n in os.listdir(LBPH_VERIFIER_DIR)
+        if n.lower().endswith((".yml", ".yaml", ".xml"))
+        and os.path.splitext(n)[0].isdigit()
     ]
 
-    # During retraining, discard the old verifier files and regenerate them.
     if force_rebuild:
-        for filename in saved_files:
+        for name in saved:
             try:
-                os.remove(os.path.join(LBPH_VERIFIER_DIR, filename))
-            except OSError as e:
-                print(f"[face_server] Could not remove old verifier {filename}: {e}", flush=True)
-        saved_files = []
+                os.remove(os.path.join(LBPH_VERIFIER_DIR, name))
+            except OSError as exc:
+                print(f"[face_server] Cannot remove verifier {name}: {exc}", flush=True)
+        saved = []
 
     new_models = {}
 
-    # Build only when requested, or when no persisted verifier exists yet.
-    if groups and (force_rebuild or not saved_files):
+    # If no saved verifiers exist, build them from the current face dataset.
+    if not saved:
+        groups = {}
+        for path, sid, _ in _iter_face_files(FACES_DIR):
+            groups.setdefault(int(sid), []).append(path)
+
         for sid, paths in sorted(groups.items()):
             images = []
             for path in paths:
-                img = _load_same_student_lbph_training_face(path)
-                if img is not None and img.size:
-                    images.append(img)
-
+                image = _load_same_student_lbph_training_face(path)
+                if image is not None and image.size:
+                    images.append(image)
             if not images:
-                print(f"[face_server] No usable verifier images for student {sid}.", flush=True)
                 continue
-
             try:
                 model = _make_lbph_recognizer()
-                labels = np.full(len(images), int(sid), dtype=np.int32)
-                model.train(images, labels)
+                model.train(images, np.full(len(images), sid, dtype=np.int32))
                 model_path = os.path.join(LBPH_VERIFIER_DIR, f"{sid}.yml")
-                model.write(model_path)
-                new_models[int(sid)] = model
+                temp_path = model_path + ".tmp.yml"
+                model.write(temp_path)
+                os.replace(temp_path, model_path)
+                new_models[sid] = model
                 print(f"[face_server] Saved LBPH verifier for student {sid} ({len(images)} images).", flush=True)
-            except Exception as e:
-                print(f"[face_server] Same-student LBPH model failed for {sid}: {e}", flush=True)
+            except Exception as exc:
+                print(f"[face_server] Verifier build failed for student {sid}: {exc}", flush=True)
 
-    # Load persisted files when we did not just build a fresh set.
-    if not new_models:
-        for filename in sorted(os.listdir(LBPH_VERIFIER_DIR)):
-            if not filename.lower().endswith((".yml", ".yaml", ".xml")):
+    # Load persisted files when present (also reload newly written files).
+    if saved or not new_models:
+        for name in sorted(os.listdir(LBPH_VERIFIER_DIR)):
+            if not name.lower().endswith((".yml", ".yaml", ".xml")):
                 continue
-            stem = os.path.splitext(filename)[0]
+            stem = os.path.splitext(name)[0]
             if not stem.isdigit():
                 continue
             sid = int(stem)
-            model_path = os.path.join(LBPH_VERIFIER_DIR, filename)
+            if sid in new_models:
+                continue
             try:
                 model = _make_lbph_recognizer()
-                model.read(model_path)
+                model.read(os.path.join(LBPH_VERIFIER_DIR, name))
                 new_models[sid] = model
-            except Exception as e:
-                print(f"[face_server] Could not load LBPH verifier {filename}: {e}", flush=True)
+            except Exception as exc:
+                print(f"[face_server] Cannot load verifier {name}: {exc}", flush=True)
 
     with _lbph_student_lock:
         _lbph_student_models = new_models
 
-    print(
-        f"[face_server] Same-student LBPH verifiers loaded: {len(new_models)} students",
-        flush=True
-    )
+    print(f"[face_server] Same-student LBPH verifiers loaded: {len(new_models)} students", flush=True)
     return bool(new_models)
 
 
@@ -1015,7 +1010,7 @@ def _arcface_predict(face_color):
             else best_similarity
         )
 
-        matched = best_similarity >= ARCFACE_THRESHOLD
+        matched = representative_similarity >= ARCFACE_THRESHOLD
 
         return {
             "id": best_id,
@@ -1960,10 +1955,10 @@ def _reload_after_training():
             "ArcFace embedding database was not created."
         )
 
-    _build_same_student_lbph_models()
+    verifier_ok = _build_same_student_lbph_models(force_rebuild=True)
 
     with _lock:
-        _models_ready["hybrid"] = True
+        _models_ready["hybrid"] = bool(_models_ready["lbph"] and _models_ready["arcface"] and verifier_ok)
 
 
 def _do_train():
@@ -2243,13 +2238,14 @@ def reload_models():
         loaded["same_student_lbph_error"] = str(e)
 
     with _lock:
-        _models_ready["hybrid"] = bool(
+        _models_ready["hybrid"] = (
             _models_ready["lbph"]
             and _models_ready["arcface"]
-            and len(_lbph_student_models) > 0
         )
 
-    loaded["hybrid"] = _models_ready["hybrid"]
+    loaded["hybrid"] = (
+        _models_ready["hybrid"]
+    )
 
     return jsonify({
         "ok": True,
@@ -2368,10 +2364,9 @@ def _load_render_lightweight_models():
         print(f"[face_server] Same-student LBPH startup build failed: {e}", flush=True)
 
     with _lock:
-        _models_ready["hybrid"] = bool(
+        _models_ready["hybrid"] = (
             _models_ready["lbph"]
             and _models_ready["arcface"]
-            and len(_lbph_student_models) > 0
         )
         _models_ready["loading"] = False
 
